@@ -35,7 +35,9 @@ struct PhoneInputView: View {
                 .onAppear { phoneFocused = true }
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Sending…" : "Continue") { Task { await vm.requestOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
+            #if DEBUG
             Text("Test numbers: +15550001111 (QA1), +15550002222 (QA2)").font(.caption).foregroundColor(.secondary)
+            #endif
         }.padding(60)
     }
 }
@@ -75,7 +77,7 @@ struct HomeView: View {
                         }.tag(item)
                     }
                 }
-                if !search.isEmpty, let room = selectedRoom {
+                if !search.isEmpty, selectedRoom != nil {
                     Section("Messages in this chat (backend search)") {
                         if roomSearch.isSearching { Text("Searching…").font(.caption).foregroundColor(.secondary) }
                         ForEach(roomSearch.results) { m in
@@ -87,14 +89,14 @@ struct HomeView: View {
             .searchable(text: $search)
             .onChange(of: search) { q in
                 if let room = selectedRoom, !q.isEmpty {
-                    Task { await roomSearch.search(roomId: room.room_id, query: q) }
+                    Task { await roomSearch.search(roomId: room.room_id, query: q, sessionToken: auth.session.sessionToken, deviceId: auth.session.deviceId) }
                 }
             }
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItemGroup {
                     Button("Refresh") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }
-                    Button("Logout") { Task { await auth.logout() } }
+                    Button("Logout") { selectedRoom = nil; Task { await auth.logout() } }
                 }
             }
         } detail: {
@@ -141,5 +143,6 @@ struct ChatDetailView: View {
                 await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl)
             }
         }
+        .onDisappear { chat.disconnect() }
     }
 }

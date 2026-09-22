@@ -110,6 +110,7 @@ import SwiftUI
     public func send(roomId: String, text: String) { socket.sendMessage(roomId: roomId, text: text) }
     /// Retry reuses the same client_message_id for idempotency.
     public func retry(roomId: String, text: String, clientId: String) { socket.sendMessage(roomId: roomId, text: text, clientId: clientId) }
+    public func disconnect() { socket.disconnect() }
 }
 
 // MARK: - Backend message search (GET /v1/rooms/{id}/messages/search, room-token plane)
@@ -117,10 +118,18 @@ import SwiftUI
     @Published public var results: [MessageResponse] = []
     @Published public var isSearching = false
     private let api = OllacoreAPI.shared
-    public func search(roomId: String, query: String) async {
+    public func search(roomId: String, query: String, sessionToken: String? = nil, deviceId: String? = nil) async {
         guard !query.isEmpty else { results = []; return }
         isSearching = true; defer { isSearching = false }
-        guard let rt = RoomTokenCache.shared.get(roomId: roomId) else { results = []; return }
+        var rt = RoomTokenCache.shared.get(roomId: roomId)
+        if rt == nil, let sessionToken, let deviceId {
+            // Lazily mint a room token so sidebar search works before the chat is opened.
+            if let fresh = try? await api.roomToken(token: sessionToken, roomId: roomId, deviceId: deviceId) {
+                RoomTokenCache.shared.set(roomId: roomId, token: fresh.access_token, wsURL: fresh.chat_websocket_url, rtcURL: fresh.rtc_websocket_url)
+                rt = RoomTokenCache.shared.get(roomId: roomId)
+            }
+        }
+        guard let rt else { results = []; return }
         do {
             results = try await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)
         } catch let e as ApiException where e.isRateLimited {

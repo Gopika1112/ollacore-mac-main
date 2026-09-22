@@ -18,12 +18,12 @@ public final class OllacoreAPI {
     /// URL builder: path segments percent-encoded, query via URLQueryItem — never manual concatenation.
     /// `path` is relative to apiBase (e.g. "directory/inbox"), without leading "/v1".
     func url(path: String, query: [URLQueryItem] = []) -> URL {
-        var c = URLComponents(string: apiBase)!
+        var c = URLComponents(string: apiBase) ?? URLComponents(string: "https://api.ollacore.com/v1")!
         let basePath = c.path
         let encoded = path.split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }.joined(separator: "/")
         c.path = basePath + "/" + encoded
         c.queryItems = query.isEmpty ? nil : query
-        return c.url!
+        return c.url ?? URL(string: "https://api.ollacore.com/v1/\(encoded)")!
     }
     private func req(url: URL, method: String, sessionToken: String? = nil, roomToken: String? = nil, body: Data? = nil) -> URLRequest {
         var r = URLRequest(url: url)
@@ -52,14 +52,27 @@ public final class OllacoreAPI {
         }
         return try JSONDecoder().decode(T.self, from: data)
     }
-    private func fire(_ r: URLRequest) async { _ = try? await session.data(for: r) }
+    /// Fire-and-forget that reports success so silent failures (receipts, devices, logout) are visible to callers.
+    @discardableResult
+    private func fire(_ r: URLRequest) async -> Bool {
+        do {
+            let (_, resp) = try await session.data(for: r)
+            return (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+        } catch { return false }
+    }
+
+    private func requireAppId() throws {
+        if appId.isEmpty { throw ApiException(message: "App not configured: set OLLACORE_APP_ID.", code: "missing_config", httpStatus: nil) }
+    }
 
     // Directory Auth
     public func requestOtp(phone: String) async throws -> OtpResponse {
-        try await exec(req("/directory/otp/request", method: "POST", body: try enc(OtpRequest(app_id: appId, phone: phone))))
+        try requireAppId()
+        return try await exec(req("/directory/otp/request", method: "POST", body: try enc(OtpRequest(app_id: appId, phone: phone))))
     }
     public func verifyOtp(phone: String, code: String) async throws -> OtpVerifyResponse {
-        try await exec(req("/directory/otp/verify", method: "POST", body: try enc(OtpVerify(app_id: appId, phone: phone, code: code))))
+        try requireAppId()
+        return try await exec(req("/directory/otp/verify", method: "POST", body: try enc(OtpVerify(app_id: appId, phone: phone, code: code))))
     }
     public func getProfile(token: String) async throws -> UserProfile {
         try await exec(req("/directory/me", method: "GET", sessionToken: token))
@@ -110,7 +123,8 @@ public final class OllacoreAPI {
         struct B: Encodable { var client_message_id: String; var kind: String; var body: [String: AnyCodable]; var reply_to: String?; var attachment_ids: [String] }
         return try await exec(req("/rooms/\(roomId)/messages", method: "POST", roomToken: roomToken, body: try enc(B(client_message_id: clientId, kind: kind, body: body, reply_to: replyTo, attachment_ids: attachments))))
     }
-    public func markRead(roomToken: String, roomId: String, messageId: String) async {
+    @discardableResult
+    public func markRead(roomToken: String, roomId: String, messageId: String) async -> Bool {
         await fire(req("/rooms/\(roomId)/messages/\(messageId)/read", method: "POST", roomToken: roomToken, body: Data()))
     }
     /// Documented endpoint: GET /v1/rooms/{room_id}/messages/search?q=&limit= (Client API).
@@ -126,8 +140,10 @@ public final class OllacoreAPI {
         let r: R = try await exec(req("/directory/devices", method: "GET", sessionToken: token))
         return r.devices
     }
-    public func registerDevice(token: String, platform: String = "macos", pushToken: String) async {
+    @discardableResult
+    public func registerDevice(token: String, platform: String = "macos", pushToken: String) async -> Bool {
         struct B: Encodable { var platform: String; var push_token: String }
-        await fire(req("/directory/devices", method: "POST", sessionToken: token, body: try? enc(B(platform: platform, push_token: pushToken))))
+        guard let body = try? enc(B(platform: platform, push_token: pushToken)) else { return false }
+        return await fire(req("/directory/devices", method: "POST", sessionToken: token, body: body))
     }
 }

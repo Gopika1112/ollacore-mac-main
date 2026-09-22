@@ -115,7 +115,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
 }
 
 /// Mirrors Android RtcWebSocket.kt — offer/answer/candidate/leave signalling.
-public enum RtcEvent { case connected, offer(sdp: String), answer(sdp: String), ended, error(String) }
+public enum RtcEvent { case connected, offer(sdp: String, requestId: Int?), answer(sdp: String), ended, error(String) }
 public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
     private var task: URLSessionWebSocketTask?
     public var onEvent: ((RtcEvent) -> Void)?
@@ -128,7 +128,7 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
         task?.receive { [weak self] res in
             if case .success(.string(let t)) = res, let d = t.data(using: .utf8),
                let f = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                if f["type"] as? String == "offer" { self?.onEvent?(.offer(sdp: f["sdp"] as? String ?? "")) }
+                if f["type"] as? String == "offer" { self?.onEvent?(.offer(sdp: f["sdp"] as? String ?? "", requestId: f["request_id"] as? Int)) }
                 else if f["type"] as? String == "answer" { self?.onEvent?(.answer(sdp: f["sdp"] as? String ?? "")) }
                 else if f["event"] != nil { self?.onEvent?(.ended) }
             }
