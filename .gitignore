@@ -1,0 +1,11 @@
+.env
+.env.*
+*.env
+Secrets.plist
+Secrets.xcconfig
+*.xcuserdata/
+DerivedData/
+.build/
+*.o
+.DS_Store
+.swiftpm/
