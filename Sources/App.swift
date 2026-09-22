@@ -21,11 +21,18 @@ import SwiftUI
 
 struct PhoneInputView: View {
     @ObservedObject var vm: AuthViewModel
+    @FocusState private var phoneFocused: Bool
     var body: some View {
         VStack(spacing: 16) {
             Text("OllaChat").font(.largeTitle).bold()
             Text("Enter your phone number")
-            TextField("+1 5550001111", text: $vm.phone).textFieldStyle(.roundedBorder).frame(width: 260)
+            TextField("+1 5550001111", text: $vm.phone)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+                .foregroundColor(.primary)
+                .background(Color(nsColor: .textBackgroundColor))
+                .focused($phoneFocused)
+                .onAppear { phoneFocused = true }
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Sending…" : "Continue") { Task { await vm.requestOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
             Text("Test numbers: +15550001111 (QA1), +15550002222 (QA2)").font(.caption).foregroundColor(.secondary)
@@ -38,7 +45,11 @@ struct OtpView: View {
         VStack(spacing: 16) {
             Text("Verify your number").font(.title2).bold()
             Text("Code sent to \(vm.phone)").foregroundColor(.secondary)
-            TextField("6-digit code", text: $vm.otpCode).textFieldStyle(.roundedBorder).frame(width: 200)
+            TextField("6-digit code", text: $vm.otpCode)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 200)
+                .foregroundColor(.primary)
+                .background(Color(nsColor: .textBackgroundColor))
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Verifying…" : "Verify") { Task { await vm.verifyOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
             Button("Resend code") { Task { await vm.requestOtp() } }.buttonStyle(.link)
