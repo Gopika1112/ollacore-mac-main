@@ -98,7 +98,7 @@ struct HomeView: View {
                 }
             }
             .searchable(text: $search)
-            .onChange(of: search) { q in
+            .onChange(of: search, initial: false) { _, q in
                 if let room = selectedRoom, !q.isEmpty {
                     Task { await roomSearch.search(roomId: room.room_id, query: q, sessionToken: auth.session.sessionToken, deviceId: auth.session.deviceId) }
                 }
