@@ -64,7 +64,8 @@ struct OtpView: View {
                 .background(Color(nsColor: .textBackgroundColor))
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Verifying…" : "Verify") { Task { await vm.verifyOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
-            Button("Resend code") { Task { await vm.requestOtp() } }.buttonStyle(.link)
+            Button(vm.canResend() ? "Resend code" : "Resend in \(vm.resendRemaining())s") { Task { await vm.requestOtp() } }
+                .buttonStyle(.link).disabled(!vm.canResend() || vm.isLoading)
         }.padding(60)
     }
 }

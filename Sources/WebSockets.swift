@@ -15,6 +15,7 @@ public enum ChatEvent {
 
 public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     private var task: URLSessionWebSocketTask?
+    public private(set) var isConnected = false
     public var onEvent: ((ChatEvent) -> Void)?
     /// Highest processed event_id per room (docs: persist per room, reconnect with catchup + overlap).
     public private(set) var highestSeqByRoom: [String: Int] = [:]
@@ -27,6 +28,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
         task = s.webSocketTask(with: r)
         task?.resume()
+        isConnected = true
         listen()
         onEvent?(.connected)
         // Resume from last seq with deliberate overlap; keep-alive ping for idle connections.
@@ -116,7 +118,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public func markRead(roomId: String, messageId: String) {
         send(type: "receipt.read", roomId: roomId, payload: ["message_id": messageId])
     }
-    public func disconnect() { pingTimer?.invalidate(); task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
+    public func disconnect() { pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         // 4401 = re-mint + reconnect + catchup; 4403 = do NOT reconnect; 1001 = backoff reconnect.
         onEvent?(.disconnected(code: code.rawValue))

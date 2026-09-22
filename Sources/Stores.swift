@@ -39,10 +39,23 @@ import SwiftUI
     @Published public var avatarUrl: String?
     public let session = SessionStore()
     private let api = OllacoreAPI.shared
+    /// Backend resend cap is 3/min: space OTP requests 20s apart, surfaced in UI.
+    public var resendCooldownSeconds = 20
+    public var lastOtpRequestAt: Date?
+    public func canResend(now: Date = Date()) -> Bool {
+        guard let last = lastOtpRequestAt else { return true }
+        return now.timeIntervalSince(last) >= Double(resendCooldownSeconds)
+    }
+    public func resendRemaining(now: Date = Date()) -> Int {
+        guard let last = lastOtpRequestAt else { return 0 }
+        return max(0, Int((Double(resendCooldownSeconds) - now.timeIntervalSince(last)).rounded(.up)))
+    }
 
     public init() { if session.isAuthenticated { step = .authenticated } }
     public func requestOtp() async {
+        guard canResend() else { error = "Wait \(resendRemaining())s before resending the code."; return }
         isLoading = true; defer { isLoading = false }
+        lastOtpRequestAt = Date()
         do { _ = try await api.requestOtp(phone: phone); step = .otp }
         catch { self.error = error.localizedDescription }
     }
@@ -176,7 +189,8 @@ public enum ReceiptState { case sent, delivered, read }
 @MainActor public final class RoomSearchViewModel: ObservableObject {
     @Published public var results: [MessageResponse] = []
     @Published public var isSearching = false
-    private let api = OllacoreAPI.shared
+    private let api: OllacoreAPI
+    public init(api: OllacoreAPI = .shared) { self.api = api }
     public func search(roomId: String, query: String, sessionToken: String? = nil, deviceId: String? = nil) async {
         guard !query.isEmpty else { results = []; return }
         isSearching = true; defer { isSearching = false }
