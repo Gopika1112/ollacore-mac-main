@@ -30,8 +30,13 @@ import SwiftUI
 @MainActor public final class AuthViewModel: ObservableObject {
     public enum Step { case phoneInput, otp, authenticated }
     @Published public var step: Step = .phoneInput
-    @Published public var phone = "", otpCode = "", isLoading = false, error: String?
-    @Published public var displayName: String?, about: String?, avatarUrl: String?
+    @Published public var phone = ""
+    @Published public var otpCode = ""
+    @Published public var isLoading = false
+    @Published public var error: String?
+    @Published public var displayName: String?
+    @Published public var about: String?
+    @Published public var avatarUrl: String?
     public let session = SessionStore()
     private let api = OllacoreAPI.shared
 
@@ -120,7 +125,7 @@ import SwiftUI
             results = try await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)
         } catch let e as ApiException where e.isRateLimited {
             // Honor Retry-After: keep prior results, caller may retry after delay.
-            await Task.sleep(UInt64((e.retryAfterSeconds ?? 2)) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(e.retryAfterSeconds ?? 2) * 1_000_000_000)
             results = (try? await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)) ?? results
         } catch { results = [] }
     }

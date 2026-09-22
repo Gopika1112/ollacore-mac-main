@@ -104,7 +104,12 @@ extension InboxItem: Hashable { public static func == (l: InboxItem, r: InboxIte
 struct ChatDetailView: View {
     var room: InboxItem; var sessionToken: String; var deviceId: String
     @StateObject private var chat = ChatViewModel()
-    @State private var draft = "", roomToken = "", wsUrl = ""
+    @State private var draft = ""
+    @State private var roomToken = ""
+    @State private var wsUrl = ""
+    init(room: InboxItem, sessionToken: String, deviceId: String) {
+        self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId
+    }
     var body: some View {
         VStack {
             ScrollView { LazyVStack(alignment: .leading, spacing: 8) {
