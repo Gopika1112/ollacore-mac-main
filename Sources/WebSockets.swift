@@ -107,6 +107,15 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public func sendMessage(roomId: String, text: String, clientId: String = UUID().uuidString) -> String {
         send(type: "message.send", roomId: roomId, payload: ["client_message_id": clientId, "kind": "text", "body": ["text": text], "attachment_ids": []])
     }
+    public func addReaction(roomId: String, messageId: String, emoji: String) {
+        send(type: "reaction.add", roomId: roomId, payload: ["message_id": messageId, "emoji": emoji])
+    }
+    public func removeReaction(roomId: String, messageId: String, emoji: String) {
+        send(type: "reaction.remove", roomId: roomId, payload: ["message_id": messageId, "emoji": emoji])
+    }
+    public func markRead(roomId: String, messageId: String) {
+        send(type: "receipt.read", roomId: roomId, payload: ["message_id": messageId])
+    }
     public func disconnect() { pingTimer?.invalidate(); task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         // 4401 = re-mint + reconnect + catchup; 4403 = do NOT reconnect; 1001 = backoff reconnect.

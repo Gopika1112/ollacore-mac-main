@@ -128,6 +128,24 @@ public final class OllacoreAPI {
     public func markRead(roomToken: String, roomId: String, messageId: String) async -> Bool {
         await fire(req("/rooms/\(roomId)/messages/\(messageId)/read", method: "POST", roomToken: roomToken, body: Data()))
     }
+    /// Documented: POST /v1/rooms/{id}/messages/{messageId}/reactions {emoji}.
+    @discardableResult
+    public func addReaction(roomToken: String, roomId: String, messageId: String, emoji: String) async -> Bool {
+        struct B: Encodable { var emoji: String }
+        guard let body = try? enc(B(emoji: emoji)) else { return false }
+        return await fire(req("/rooms/\(roomId)/messages/\(messageId)/reactions", method: "POST", roomToken: roomToken, body: body))
+    }
+    /// Documented: DELETE /v1/rooms/{id}/messages/{messageId}/reactions {emoji}.
+    @discardableResult
+    public func removeReaction(roomToken: String, roomId: String, messageId: String, emoji: String) async -> Bool {
+        struct B: Encodable { var emoji: String }
+        guard let body = try? enc(B(emoji: emoji)) else { return false }
+        return await fire(req("/rooms/\(roomId)/messages/\(messageId)/reactions", method: "DELETE", roomToken: roomToken, body: body))
+    }
+    /// Documented: GET /v1/rooms/{id}/attachments/{attachmentId}/download → presigned URL.
+    public func downloadAttachment(roomToken: String, roomId: String, attachmentId: String) async throws -> AttachmentDownloadResponse {
+        try await exec(req(url: url(path: "rooms/\(roomId)/attachments/\(attachmentId)/download"), method: "GET", roomToken: roomToken))
+    }
     /// Documented endpoint: GET /v1/rooms/{room_id}/messages/search?q=&limit= (Client API).
     public func searchMessages(roomToken: String, roomId: String, q: String, limit: Int = 20) async throws -> [MessageResponse] {
         struct R: Decodable { var messages: [MessageResponse]; var has_more: Bool }

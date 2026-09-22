@@ -101,7 +101,7 @@ struct HomeView: View {
             }
         } detail: {
             if let room = selectedRoom, let token = auth.session.sessionToken {
-                ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId)
+                ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId)
             } else {
                 Text("Select a conversation").foregroundColor(.secondary)
             }
@@ -115,20 +115,29 @@ struct HomeView: View {
 extension InboxItem: Hashable { public static func == (l: InboxItem, r: InboxItem) -> Bool { l.room_id == r.room_id }; public func hash(into h: inout Hasher) { h.combine(room_id) } }
 
 struct ChatDetailView: View {
-    var room: InboxItem; var sessionToken: String; var deviceId: String
+    var room: InboxItem; var sessionToken: String; var deviceId: String; var ownId: String?
     @StateObject private var chat = ChatViewModel()
     @State private var draft = ""
     @State private var roomToken = ""
     @State private var wsUrl = ""
-    init(room: InboxItem, sessionToken: String, deviceId: String) {
-        self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId
+    init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil) {
+        self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId
     }
     var body: some View {
-        VStack {
+        VStack(spacing: 0) {
+            if let call = chat.activeCall {
+                HStack {
+                    Image(systemName: "phone.fill").foregroundColor(.green)
+                    Text("Incoming call… (voice/video UI not built yet)").font(.callout)
+                    Spacer()
+                    Button("Dismiss") { chat.dismissCall() }
+                }
+                .padding(8).background(Color.green.opacity(0.12))
+                .accessibilityIdentifier("call_banner_\(call.callId)")
+            }
             ScrollView { LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(chat.messages) { m in
-                    Text(m.body["text"]?.value as? String ?? "[\(m.kind)]")
-                        .padding(8).background(Color.accentColor.opacity(0.12)).cornerRadius(8)
+                    MessageBubble(message: m, roomId: room.room_id, chat: chat)
                 }
             }.padding() }
             HStack {
@@ -140,9 +149,77 @@ struct ChatDetailView: View {
         .task {
             if let rt = try? await OllacoreAPI.shared.roomToken(token: sessionToken, roomId: room.room_id, deviceId: deviceId) {
                 roomToken = rt.access_token; wsUrl = rt.chat_websocket_url
-                await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl)
+                await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl, ownId: ownId)
+                chat.markVisibleAsRead(roomId: room.room_id)
             }
         }
         .onDisappear { chat.disconnect() }
+    }
+}
+
+struct MessageBubble: View {
+    var message: MessageResponse
+    var roomId: String
+    @ObservedObject var chat: ChatViewModel
+    @State private var imageURL: URL?
+
+    private var caption: String? { message.body["text"]?.value as? String }
+    private var filename: String? { message.body["filename"]?.value as? String }
+    private var mime: String? { message.body["mime"]?.value as? String }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            switch message.kind {
+            case MessageKinds.image:
+                if let u = imageURL {
+                    AsyncImage(url: u) { phase in
+                        switch phase {
+                        case .success(let img): img.resizable().scaledToFit().frame(maxWidth: 320).cornerRadius(8)
+                        case .failure: Label("Image unavailable", systemImage: "photo")
+                        default: ProgressView().frame(width: 200, height: 120)
+                        }
+                    }
+                } else {
+                    Label("Image", systemImage: "photo").foregroundColor(.secondary)
+                        .task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "") }
+                }
+                if let c = caption { Text(c) }
+            case MessageKinds.video:
+                Label(filename ?? "Video", systemImage: "video.fill").foregroundColor(.secondary)
+                if let c = caption { Text(c).font(.caption) }
+            case MessageKinds.audio:
+                Label("Voice message", systemImage: "waveform").foregroundColor(.secondary)
+            case MessageKinds.file:
+                Label(filename ?? "Document", systemImage: "doc.fill").foregroundColor(.secondary)
+                if let m = mime { Text(m).font(.caption).foregroundColor(.secondary) }
+            case MessageKinds.location:
+                let lat = message.body["lat"]?.value
+                let lon = message.body["lon"]?.value ?? message.body["lng"]?.value
+                Label("\(lat.map { "\($0)" } ?? "?"), \(lon.map { "\($0)" } ?? "?")", systemImage: "mappin").foregroundColor(.secondary)
+                if let c = caption { Text(c).font(.caption) }
+            default:
+                Text(caption ?? "[\(message.kind)]")
+            }
+            HStack(spacing: 6) {
+                if let reacts = chat.reactions[message.id], !reacts.isEmpty {
+                    ForEach(reacts.sorted(by: { $0.key < $1.key }), id: \.key) { emoji, count in
+                        Text(count > 1 ? "\(emoji) \(count)" : emoji)
+                            .font(.caption).padding(4).background(Color.secondary.opacity(0.15)).cornerRadius(6)
+                    }
+                }
+                if message.sender_id == chat.currentSenderId {
+                    Text(chat.receiptLabel(for: message.id))
+                        .font(.caption2).foregroundColor(chat.receiptColor(for: message.id))
+                }
+            }
+        }
+        .padding(8).background(Color.accentColor.opacity(0.12)).cornerRadius(8)
+        .contextMenu {
+            ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
+                Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
+            }
+        }
+    }
+}
     }
 }

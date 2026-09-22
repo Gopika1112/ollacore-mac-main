@@ -74,6 +74,7 @@ public struct MessageResponse: Codable, Identifiable {
     }
 }
 public struct AttachmentInfo: Codable { public var attachment_id: String; public var mime: String?; public var filename: String?; public var byte_size: Int64? }
+public struct AttachmentDownloadResponse: Codable { public var download_url: String; public var expires_at: String? }
 public struct Participant: Codable { public var principal_id: String; public var role: String?; public var display_name: String?; public var phone: String? }
 public struct DeviceResponse: Codable, Identifiable { public var id: String; public var platform: String; public var push_token: String; public var app_id: String; public var updated_at: String }
 public struct ApiError: Codable { public var code: String; public var message: String }

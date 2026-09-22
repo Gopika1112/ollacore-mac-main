@@ -69,14 +69,23 @@ import SwiftUI
         inbox = (try? await api.getInbox(token: token)) ?? []
     }
 }
+public enum ReceiptState { case sent, delivered, read }
+
 @MainActor public final class ChatViewModel: ObservableObject {
     @Published public var messages: [MessageResponse] = []
     @Published public var rateLimitedNotice: String?
+    @Published public var receipts: [String: ReceiptState] = [:]
+    @Published public var reactions: [String: [String: Int]] = [:]
+    @Published public var activeCall: (callId: String, initiator: String)?
+    @Published public var attachmentURLs: [String: URL] = [:]
     public var socket = ChatWebSocket()
-    private let api = OllacoreAPI.shared
+    private let api: OllacoreAPI
+    public init(api: OllacoreAPI = .shared) { self.api = api }
     private var seenIds: Set<String> = []
     private var currentRoom = "", currentToken = ""
-    public func join(roomToken: String, roomId: String, wsUrl: String) async {
+    public var ownId: String?
+    public func join(roomToken: String, roomId: String, wsUrl: String, ownId: String? = nil) async {
+        if let ownId { self.ownId = ownId }
         currentRoom = roomId; currentToken = roomToken
         let hist = (try? await api.listMessages(roomToken: roomToken, roomId: roomId)) ?? []
         messages = hist.sorted { $0.event_seq < $1.event_seq }
@@ -93,7 +102,23 @@ import SwiftUI
                     self.messages.sort { $0.event_seq < $1.event_seq } // ordering by seq
                 case .messageUpdated(let m):
                     if let i = self.messages.firstIndex(where: { $0.id == m.id }) { self.messages[i] = m }
-                case .messageDeleted(_, let id): self.messages.removeAll { $0.id == id }
+                case .messageDeleted(_, let id):
+                    self.messages.removeAll { $0.id == id }
+                    self.receipts.removeValue(forKey: id)
+                    self.reactions.removeValue(forKey: id)
+                case .receiptDelivered(_, let id): self.receipts[id] = .delivered
+                case .receiptRead(_, let id): self.receipts[id] = .read
+                case .reactionAdded(_, let id, let emoji):
+                    var m = self.reactions[id] ?? [:]; m[emoji, default: 0] += 1; self.reactions[id] = m
+                case .reactionRemoved(_, let id, let emoji):
+                    var m = self.reactions[id] ?? [:]
+                    m[emoji, default: 1] -= 1
+                    if (m[emoji] ?? 0) <= 0 { m.removeValue(forKey: emoji) }
+                    self.reactions[id] = m.isEmpty ? nil : m
+                case .callStarted(_, let callId):
+                    // Banner only: in-call audio/video UI is not built; never fake an answered call.
+                    self.activeCall = (callId, "")
+                case .callEnded: self.activeCall = nil
                 case .error(let code, let msg, _):
                     if code == "rate_limited" { self.rateLimitedNotice = msg } // WS 429 surfaced, not fatal
                 case .resync:
@@ -111,6 +136,40 @@ import SwiftUI
     /// Retry reuses the same client_message_id for idempotency.
     public func retry(roomId: String, text: String, clientId: String) { socket.sendMessage(roomId: roomId, text: text, clientId: clientId) }
     public func disconnect() { socket.disconnect() }
+    public func addReaction(roomId: String, messageId: String, emoji: String) {
+        socket.addReaction(roomId: roomId, messageId: messageId, emoji: emoji)
+        Task { _ = await api.addReaction(roomToken: currentToken, roomId: roomId, messageId: messageId, emoji: emoji) }
+    }
+    public func removeReaction(roomId: String, messageId: String, emoji: String) {
+        socket.removeReaction(roomId: roomId, messageId: messageId, emoji: emoji)
+        Task { _ = await api.removeReaction(roomToken: currentToken, roomId: roomId, messageId: messageId, emoji: emoji) }
+    }
+    public func markVisibleAsRead(roomId: String) {
+        for m in messages {
+            socket.markRead(roomId: roomId, messageId: m.id)
+        }
+        Task { for m in messages { _ = await api.markRead(roomToken: currentToken, roomId: roomId, messageId: m.id) } }
+    }
+    public func dismissCall() { activeCall = nil }
+    public var currentSenderId: String? { ownId }
+    public func receiptLabel(for messageId: String) -> String {
+        switch receipts[messageId] {
+        case .read: return "✓✓ read"
+        case .delivered: return "✓✓"
+        default: return "✓"
+        }
+    }
+    public func receiptColor(for messageId: String) -> Color {
+        receipts[messageId] == .read ? .blue : .secondary
+    }
+    public func resolveAttachmentURL(attachmentId: String) async -> URL? {
+        if let u = attachmentURLs[attachmentId] { return u }
+        guard !currentRoom.isEmpty,
+              let r = try? await api.downloadAttachment(roomToken: currentToken, roomId: currentRoom, attachmentId: attachmentId),
+              let u = URL(string: r.download_url) else { return nil }
+        attachmentURLs[attachmentId] = u
+        return u
+    }
 }
 
 // MARK: - Backend message search (GET /v1/rooms/{id}/messages/search, room-token plane)
