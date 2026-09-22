@@ -81,7 +81,8 @@ public final class OllacoreAPI {
     public func updateProfile(token: String, req: UpdateProfileRequest) async throws -> UserProfile {
         try await exec(self.req("/directory/me", method: "PATCH", sessionToken: token, body: try enc(req)))
     }
-    public func logout(token: String) async { await fire(req("/directory/logout", method: "POST", sessionToken: token, body: Data("{}".utf8))) }
+    @discardableResult
+    public func logout(token: String) async -> Bool { await fire(req("/directory/logout", method: "POST", sessionToken: token, body: Data("{}".utf8))) }
 
     // Conversations / inbox
     public func listConversations(token: String) async throws -> [ConversationSummary] {

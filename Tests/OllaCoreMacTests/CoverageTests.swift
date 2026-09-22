@@ -69,6 +69,22 @@ import XCTest
         XCTAssertFalse(ok)
     }
 
+    func testLogoutSurfacesServerFailure() async {
+        let bad = mockApi(status: 500, body: "{}")
+        let vm = AuthViewModel(api: bad)
+        vm.session.save(token: "t", userId: "u")
+        await vm.logout()
+        XCTAssertFalse(vm.session.isAuthenticated) // local session always clears
+        XCTAssertNotNil(vm.error) // ...but the server failure is shown, not swallowed
+        XCTAssertEqual(vm.step, .phoneInput)
+        // Success path clears without error.
+        let good = mockApi(status: 200, body: "{}")
+        let vm2 = AuthViewModel(api: good)
+        vm2.session.save(token: "t", userId: "u")
+        await vm2.logout()
+        XCTAssertNil(vm2.error)
+    }
+
     func testResendCooldown() {
         let vm = AuthViewModel()
         vm.resendCooldownSeconds = 20

@@ -38,7 +38,8 @@ import SwiftUI
     @Published public var about: String?
     @Published public var avatarUrl: String?
     public let session = SessionStore()
-    private let api = OllacoreAPI.shared
+    private let api: OllacoreAPI
+    public init(api: OllacoreAPI = .shared) { self.api = api; if session.isAuthenticated { step = .authenticated } }
     /// Backend resend cap is 3/min: space OTP requests 20s apart, surfaced in UI.
     public var resendCooldownSeconds = 20
     public var lastOtpRequestAt: Date?
@@ -51,7 +52,6 @@ import SwiftUI
         return max(0, Int((Double(resendCooldownSeconds) - now.timeIntervalSince(last)).rounded(.up)))
     }
 
-    public init() { if session.isAuthenticated { step = .authenticated } }
     public func requestOtp() async {
         guard canResend() else { error = "Wait \(resendRemaining())s before resending the code."; return }
         isLoading = true; defer { isLoading = false }
@@ -68,8 +68,11 @@ import SwiftUI
         } catch { self.error = error.localizedDescription }
     }
     public func logout() async {
-        if let t = session.sessionToken { await api.logout(token: t) }
+        // Local session always clears (security); a server failure is surfaced, not hidden.
+        var serverOk = true
+        if let t = session.sessionToken { serverOk = await api.logout(token: t) }
         session.clear(); step = .phoneInput
+        if !serverOk { error = "Signed out on this device; the server did not confirm logout." }
     }
 }
 
