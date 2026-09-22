@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - App entry (mirrors MainActivity.kt NavHost: splash -> onboarding -> phone -> otp -> home -> chat)
 @main struct OllaCoreMacApp: App {
@@ -14,6 +15,10 @@ import SwiftUI
                 case .authenticated: HomeView(auth: auth, home: home, selectedRoom: $selectedRoom)
                 }
             }.frame(minWidth: 900, minHeight: 600)
+                .onAppear {
+                    // Ensure our window takes keyboard focus when launched from Terminal.
+                    NSApp.activate(ignoringOtherApps: true)
+                }
         }
         .commands { SidebarCommands() }
     }
@@ -27,12 +32,17 @@ struct PhoneInputView: View {
             Text("OllaChat").font(.largeTitle).bold()
             Text("Enter your phone number")
             TextField("+1 5550001111", text: $vm.phone)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
                 .frame(width: 260)
+                .padding(8)
                 .foregroundColor(.primary)
                 .background(Color(nsColor: .textBackgroundColor))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
                 .focused($phoneFocused)
                 .onAppear { phoneFocused = true }
+            // Diagnostic: proves whether keystrokes reach the binding even if glyphs misrender.
+            Text(vm.phone.isEmpty ? " " : "\(vm.phone.count) character(s) entered")
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Sending…" : "Continue") { Task { await vm.requestOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
             #if DEBUG
