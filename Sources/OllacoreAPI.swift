@@ -12,7 +12,8 @@ public final class OllacoreAPI {
     public static let shared = OllacoreAPI()
     public var apiBase = AppConfig.apiBase
     public var appId: String { AppConfig.appId }
-    private let session = URLSession.shared
+    private let session: URLSession
+    public init(session: URLSession = .shared) { self.session = session }
     private let json = JSONEncoder()
 
     /// URL builder: path segments percent-encoded, query via URLQueryItem — never manual concatenation.
