@@ -155,6 +155,13 @@ public struct FailedDraft: Identifiable {
     private var seenIds: Set<String> = []
     private var joinGen = 0
     private var currentRoom = "", currentToken = ""
+    /// ST-01: bound in-memory history so long sessions can't grow without limit.
+    public var maxRetainedMessages = 300
+    private func enforceWindow() {
+        guard messages.count > maxRetainedMessages else { return }
+        messages = Array(messages.sorted { $0.event_seq < $1.event_seq }.suffix(maxRetainedMessages))
+        seenIds = Set(messages.map(\.id))
+    }
     public var ownId: String?
     @Published public var historyError: String?
     @Published public var historyLoaded = false
@@ -178,6 +185,7 @@ public struct FailedDraft: Identifiable {
             guard gen == joinGen else { return } // superseded by a newer join: publish nothing
             messages = hist.sorted { $0.event_seq < $1.event_seq }
             seenIds = Set(messages.map(\.id))
+            enforceWindow()
             historyLoaded = true
         } catch {
             // Failed history: stay out of the socket and report, instead of an empty room.
@@ -193,18 +201,19 @@ public struct FailedDraft: Identifiable {
                 guard let self else { return }
                 switch e {
                 case .messageCreated(let m):
-                    guard self.isCurrentRoom(m.roomId) else { break } // cross-room events never apply
+                    guard self.isCurrentRoom(m.room_id) else { break } // cross-room events never apply
                     guard !self.seenIds.contains(m.id) else { break } // duplicate prevention
                     self.seenIds.insert(m.id)
                     self.messages.append(m)
                     self.messages.sort { $0.event_seq < $1.event_seq } // ordering by seq
+                    self.enforceWindow()
                     if m.sender_id == self.ownId {
                         if self.receipts[m.id] == nil { self.receipts[m.id] = .sent }
                         // A send we tracked succeeded: clear pending + any failed draft.
                         if let cid = m.client_message_id { self.clearPending(clientId: cid) }
                     }
                 case .messageUpdated(let m):
-                    guard self.isCurrentRoom(m.roomId) else { break }
+                    guard self.isCurrentRoom(m.room_id) else { break }
                     if let i = self.messages.firstIndex(where: { $0.id == m.id }) { self.messages[i] = m }
                 case .messageDeleted(let room, let id):
                     guard self.isCurrentRoom(room) else { break }
@@ -245,6 +254,7 @@ public struct FailedDraft: Identifiable {
                     let fresh = (try? await self.api.listMessages(roomToken: self.currentToken, roomId: self.currentRoom)) ?? []
                     self.messages = fresh.sorted { $0.event_seq < $1.event_seq }
                     self.seenIds = Set(fresh.map(\.id))
+                    self.enforceWindow()
                 default: break
                 }
             }
@@ -266,6 +276,8 @@ public struct FailedDraft: Identifiable {
     }
     @discardableResult
     public func send(roomId: String, text: String) -> String {
+        // ST-03: the view trims too, but programmatic sends must never push blanks.
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
         let clientId = UUID().uuidString
         let reqId = socket.sendMessage(roomId: roomId, text: text, clientId: clientId, replyTo: replyTo?.id)
         pendingFrames[reqId] = (clientId, text)
@@ -281,6 +293,17 @@ public struct FailedDraft: Identifiable {
         sendingCount = pendingFrames.count
         failedDrafts.removeAll { $0.id == clientId }
         return reqId
+    }
+    /// Paging for long chats: prepends older messages (deduplicated), newest stay put.
+    public func loadMore() async {
+        guard historyLoaded, !currentRoom.isEmpty, let oldest = messages.map(\.event_seq).min() else { return }
+        guard let older = try? await api.listMessages(roomToken: currentToken, roomId: currentRoom, beforeSeq: oldest) else { return }
+        for m in older where !seenIds.contains(m.id) && m.room_id == currentRoom {
+            seenIds.insert(m.id)
+            messages.append(m)
+        }
+        messages.sort { $0.event_seq < $1.event_seq }
+        enforceWindow()
     }
     public func retryDraft(roomId: String, draft: FailedDraft) {
         let reqId = socket.sendMessage(roomId: roomId, text: draft.text, clientId: draft.id)

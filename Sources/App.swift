@@ -191,6 +191,11 @@ struct ChatDetailView: View {
                 }.padding()
             }
             ScrollView { LazyVStack(alignment: .leading, spacing: 8) {
+                if chat.historyLoaded && !chat.messages.isEmpty {
+                    Button("Load earlier messages") { Task { await chat.loadMore() } }
+                        .font(.caption).buttonStyle(.link)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
                 ForEach(chat.messages) { m in
                     MessageBubble(message: m, roomId: room.room_id, chat: chat,
                                   onReply: { chat.replyTo = m },

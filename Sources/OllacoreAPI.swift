@@ -56,7 +56,20 @@ public final class OllacoreAPI {
         return q.contains { ["token", "access_token", "session_token", "api_key"].contains($0.name.lowercased()) }
     }
     private func req(url: URL, method: String, sessionToken: String? = nil, roomToken: String? = nil, body: Data? = nil) -> URLRequest {
-        precondition(!Self.urlCarriesCredential(url), "Credential must not appear in URL query")
+        // ST-02: programmer error must degrade, never crash a release build.
+        assert(!Self.urlCarriesCredential(url), "Credential must not appear in URL query")
+        guard !Self.urlCarriesCredential(url) else {
+            var stripped = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            stripped.queryItems = stripped.queryItems?.filter {
+                !["token", "access_token", "session_token", "api_key"].contains($0.name.lowercased())
+            }
+            var r = URLRequest(url: stripped.url ?? url)
+            r.httpMethod = method
+            r.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+            if let t = sessionToken ?? roomToken { r.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
+            r.httpBody = body
+            return r
+        }
         var r = URLRequest(url: url)
         r.httpMethod = method
         r.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
