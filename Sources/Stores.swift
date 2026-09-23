@@ -173,6 +173,7 @@ public struct FailedDraft: Identifiable {
         socket.onEvent = nil
         socket.onSendFailure = nil
         joinGen += 1
+        uploadGen += 1 // a new room orphans any upload bound to the previous one
         let gen = joinGen
         currentRoom = roomId; currentToken = roomToken
         connectionError = nil; accessRevoked = false
@@ -181,6 +182,7 @@ public struct FailedDraft: Identifiable {
         receipts.removeAll(); reactions.removeAll()
         failedDrafts.removeAll(); pendingFrames.removeAll(); sendingCount = 0
         selectedIds.removeAll(); selectionMode = false
+        isLoadingMore = false; loadingMoreGen = nil
         do {
             let page = try await api.listMessages(roomToken: roomToken, roomId: roomId)
             guard gen == joinGen else { return } // superseded by a newer join: publish nothing
@@ -262,8 +264,10 @@ public struct FailedDraft: Identifiable {
                 case .resync:
                     // Fell too far behind: refetch history, reset cursor.
                     // Generation-guarded: a room switch mid-fetch must not restore stale data.
+                    // Room/token captured up front so the request itself targets the right room.
                     let gen = self.joinGen
-                    let fresh = (try? await self.api.listMessages(roomToken: self.currentToken, roomId: self.currentRoom))?.messages ?? []
+                    let room = self.currentRoom, token = self.currentToken
+                    let fresh = (try? await self.api.listMessages(roomToken: token, roomId: room))?.messages ?? []
                     guard gen == self.joinGen else { break }
                     self.messages = fresh.sorted { $0.event_seq < $1.event_seq }
                     self.seenIds = Set(fresh.map(\.id))
@@ -309,13 +313,17 @@ public struct FailedDraft: Identifiable {
     }
     @Published public var hasMoreHistory = false
     @Published public var isLoadingMore = false
+    private var loadingMoreGen: Int?
     /// Paging for long chats: prepends older messages (deduplicated), newest stay put.
     public func loadMore() async {
         guard historyLoaded, hasMoreHistory, !currentRoom.isEmpty, let oldest = messages.map(\.event_seq).min() else { return }
         let gen = joinGen
         let room = currentRoom, token = currentToken
         isLoadingMore = true
-        defer { if gen == joinGen { isLoadingMore = false } }
+        loadingMoreGen = gen
+        // NEW-19: only the operation that owns the spinner may clear it — but a
+        // stale finish must still release it when nobody newer is loading.
+        defer { if loadingMoreGen == gen { isLoadingMore = false; loadingMoreGen = nil } }
         guard let page = try? await api.listMessages(roomToken: token, roomId: room, beforeSeq: oldest) else { return }
         guard gen == joinGen, room == currentRoom else { return } // NEW-15: stale page never lands
         for m in page.messages where !seenIds.contains(m.id) && m.room_id == currentRoom {
@@ -341,7 +349,7 @@ public struct FailedDraft: Identifiable {
         // Fresh id: a forward is a new message (unlike retry, which must reuse the id).
         guard let rt = try? await api.roomToken(token: sessionToken, roomId: toRoomId, deviceId: deviceId) else { return false }
         let body = msg.body
-        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachmentIds: msg.attachment_ids)) != nil
+        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachments: msg.attachment_ids)) != nil
     }
     // MARK: Selection
     public func toggleSelect(id: String) {
@@ -355,6 +363,7 @@ public struct FailedDraft: Identifiable {
     }
     public func disconnect() {
         joinGen += 1 // invalidate any in-flight join: it must not connect after the view is gone
+        uploadGen += 1 // invalidate any in-flight upload for the same reason
         socketSession += 1 // orphan already-queued socket callbacks with the old session id
         socket.disconnect()
     }
@@ -390,6 +399,7 @@ public struct FailedDraft: Identifiable {
     @Published public var uploadState: UploadState = .idle
     private var uploadTask: URLSessionUploadTask?
     private var pendingUpload: (data: Data, filename: String, mime: String, kind: String, caption: String?)?
+    private var uploadGen = 0
     /// init → PUT presigned → complete → send. Documented endpoints only; single-PUT
     /// (large multipart uploads remain future work and are refused client-side above 100MB).
     public func uploadAndSend(roomId: String, data: Data, filename: String, mime: String, kind: String, caption: String? = nil) {
@@ -409,8 +419,13 @@ public struct FailedDraft: Identifiable {
     }
     private func runUpload(roomId: String) async {
         guard let p = pendingUpload else { uploadState = .idle; return }
+        // NEW-21: pin the room, token, and session for the whole pipeline. A room
+        // switch or disconnect mid-upload aborts instead of mixing credentials.
+        uploadGen += 1
+        let gen = uploadGen
+        let token = currentToken, room = roomId
         do {
-            let initR = try await api.initAttachment(roomToken: currentToken, roomId: roomId, filename: p.filename, mime: p.mime, byteSize: p.data.count)
+            let initR = try await api.initAttachment(roomToken: token, roomId: room, filename: p.filename, mime: p.mime, byteSize: p.data.count)
             guard let putURL = URL(string: initR.upload_url), putURL.scheme?.lowercased() == "https" else {
                 throw ApiException(message: "Invalid upload URL.", code: "bad_upload_url", httpStatus: nil)
             }
@@ -432,12 +447,14 @@ public struct FailedDraft: Identifiable {
             guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else {
                 throw ApiException(message: "Upload failed.", code: "upload_failed", httpStatus: (resp as? HTTPURLResponse)?.statusCode)
             }
-            guard await api.completeAttachment(roomToken: currentToken, roomId: roomId, attachmentId: initR.attachment_id) else {
+            guard gen == uploadGen else { return } // room switched mid-upload: abort, don't mix rooms
+            guard await api.completeAttachment(roomToken: token, roomId: room, attachmentId: initR.attachment_id) else {
                 throw ApiException(message: "Attachment verification failed.", code: "complete_failed", httpStatus: nil)
             }
+            guard gen == uploadGen else { return }
             var body: [String: AnyCodable] = ["mime": AnyCodable(p.mime), "filename": AnyCodable(p.filename)]
             if let c = p.caption { body["text"] = AnyCodable(c) }
-            _ = try await api.sendMessage(roomToken: currentToken, roomId: roomId, clientId: UUID().uuidString, kind: kindForMime(p.mime, requested: p.kind), body: body, attachmentIds: [initR.attachment_id])
+            _ = try await api.sendMessage(roomToken: token, roomId: room, clientId: UUID().uuidString, kind: kindForMime(p.mime, requested: p.kind), body: body, attachments: [initR.attachment_id])
             pendingUpload = nil
             uploadState = .idle
         } catch is CancellationError {
