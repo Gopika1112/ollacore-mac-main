@@ -229,6 +229,36 @@ import XCTest
         vm.disconnect()
     }
 
+    func testNegativeRetryAfterCannotTrap() async {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "-1"])!
+            return (resp, Data(#"{"code":"rate_limited","message":"slow"}"#.utf8))
+        }
+        let vm = RoomSearchViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        RoomTokenCache.shared.set(roomId: "r", token: "t", wsURL: "w", rtcURL: "c", expiresAt: "2999-01-01T00:00:00Z")
+        await vm.search(roomId: "r", query: "q")
+        XCTAssertTrue(vm.results.isEmpty) // no crash, prior (empty) results kept
+        RoomTokenCache.shared.clear()
+    }
+
+    func testFire401PostsLogout() async {
+        let posted = expectation(description: "fire 401")
+        let obs = NotificationCenter.default.addObserver(forName: .ollacoreUnauthorized, object: nil, queue: nil) { _ in posted.fulfill() }
+        defer { NotificationCenter.default.removeObserver(obs) }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+            return (resp, Data("{}".utf8))
+        }
+        let api = OllacoreAPI(session: URLSession(configuration: cfg))
+        let ok = await api.markRead(roomToken: "t", roomId: "r", messageId: "m")
+        XCTAssertFalse(ok)
+        await fulfillment(of: [posted], timeout: 2)
+    }
+
     func testCancelOrphansInflightSearch() async {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]

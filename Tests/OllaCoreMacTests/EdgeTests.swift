@@ -43,6 +43,17 @@ import XCTest
         XCTAssertTrue(store.entries.isEmpty)
     }
 
+    func testLegacyCorruptQuarantined() {
+        UserDefaults.standard.set(Data("old-garbage".utf8), forKey: "call_log")
+        UserDefaults.standard.set(0, forKey: "call_log_version")
+        _ = CallLogStore()
+        let keys = UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix("call_log_corrupt_backup") }
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertNil(UserDefaults.standard.data(forKey: "call_log"))
+        for k in keys { UserDefaults.standard.removeObject(forKey: k) }
+        UserDefaults.standard.removeObject(forKey: "call_log_version")
+    }
+
     private func corruptKeys() -> [String] {
         UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix("call_log_corrupt_backup") }
     }

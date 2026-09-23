@@ -254,7 +254,10 @@ public struct FailedDraft: Identifiable {
                 case .membershipRevoked: self.accessRevoked = true
                 case .resync:
                     // Fell too far behind: refetch history, reset cursor.
+                    // Generation-guarded: a room switch mid-fetch must not restore stale data.
+                    let gen = self.joinGen
                     let fresh = (try? await self.api.listMessages(roomToken: self.currentToken, roomId: self.currentRoom)) ?? []
+                    guard gen == self.joinGen else { break }
                     self.messages = fresh.sorted { $0.event_seq < $1.event_seq }
                     self.seenIds = Set(fresh.map(\.id))
                     self.enforceWindow()
@@ -386,7 +389,7 @@ public struct FailedDraft: Identifiable {
         generation += 1
         let gen = generation
         guard !query.isEmpty else { results = []; return }
-        isSearching = true; defer { isSearching = false }
+        isSearching = true; defer { if gen == generation { isSearching = false } }
         var rt = RoomTokenCache.shared.get(roomId: roomId)
         if rt == nil, let sessionToken, let deviceId {
             // Lazily mint a room token so sidebar search works before the chat is opened.
@@ -402,9 +405,10 @@ public struct FailedDraft: Identifiable {
             if gen == generation { results = found }
         } catch let e as ApiException where e.isRateLimited {
             // Honor Retry-After: keep prior results, caller may retry after delay.
-            try? await Task.sleep(nanoseconds: UInt64(e.retryAfterSeconds ?? 2) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(max(0, e.retryAfterSeconds ?? 2)) * 1_000_000_000)
             guard gen == generation, !Task.isCancelled else { return }
-            results = (try? await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)) ?? results
+            if let retry = try? await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query),
+               gen == generation, !Task.isCancelled { results = retry }
         } catch {
             if gen == generation { results = [] }
         }
@@ -424,7 +428,12 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
         let v = UserDefaults.standard.integer(forKey: Self.versionKey)
         if v == 0, let legacy = UserDefaults.standard.data(forKey: "call_log") {
             // Migrate the original unversioned store once, then stamp the version.
-            if let e = try? JSONDecoder().decode([CallEntry].self, from: legacy) { entries = e }
+            // Undecodable legacy data is quarantined like current data, never dropped.
+            if let e = try? JSONDecoder().decode([CallEntry].self, from: legacy) {
+                entries = e
+            } else {
+                Self.quarantine(legacy)
+            }
             UserDefaults.standard.removeObject(forKey: "call_log")
             UserDefaults.standard.set(Self.storeVersion, forKey: Self.versionKey)
             persist()
@@ -434,17 +443,19 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
         if let e = try? JSONDecoder().decode([CallEntry].self, from: d) {
             entries = e
         } else {
-            // Corrupt data is quarantined under a timestamped key (rotated, newest
-            // kept) and the log restarts empty — repeats never overwrite history.
-            let stamp = Int(Date().timeIntervalSince1970 * 1000)
-            let nonce = Int.random(in: 0..<100000)
-            UserDefaults.standard.set(d, forKey: "\(Self.corruptPrefix)_\(stamp)_\(nonce)")
+            // Corrupt data is quarantined (rotated, newest kept) and the log restarts empty.
+            Self.quarantine(d)
             UserDefaults.standard.removeObject(forKey: Self.key)
-            let olds = UserDefaults.standard.dictionaryRepresentation().keys
-                .filter { $0.hasPrefix(Self.corruptPrefix) }.sorted()
-            for extra in olds.dropLast(Self.maxBackups) {
-                UserDefaults.standard.removeObject(forKey: extra)
-            }
+        }
+    }
+    private static func quarantine(_ d: Data) {
+        let stamp = Int(Date().timeIntervalSince1970 * 1000)
+        let nonce = Int.random(in: 0..<100000)
+        UserDefaults.standard.set(d, forKey: "\(corruptPrefix)_\(stamp)_\(nonce)")
+        let olds = UserDefaults.standard.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(corruptPrefix) }.sorted()
+        for extra in olds.dropLast(maxBackups) {
+            UserDefaults.standard.removeObject(forKey: extra)
         }
     }
     public func add(_ e: CallEntry) { entries.insert(e, at: 0); persist() }

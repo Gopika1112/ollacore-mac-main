@@ -151,6 +151,7 @@ struct ChatDetailView: View {
     @State private var forwarding: MessageResponse?
     @State private var forwardDone: String?
     @State private var historyAttempt = 0
+    @State private var roomTokenError: String?
     init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = []) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
     }
@@ -183,6 +184,12 @@ struct ChatDetailView: View {
                     Button("Delete") { chat.deleteSelected(roomId: room.room_id) }
                     Button("Clear") { chat.clearSelection() }
                 }.padding(8).background(Color.secondary.opacity(0.12))
+            }
+            if let terr = roomTokenError {
+                VStack(spacing: 8) {
+                    Text("Couldn't open conversation: \(terr)").font(.callout).foregroundColor(.red)
+                    Button("Retry") { roomTokenError = nil; historyAttempt += 1 }
+                }.padding()
             }
             if let herr = chat.historyError {
                 VStack(spacing: 8) {
@@ -243,10 +250,15 @@ struct ChatDetailView: View {
         .task(id: historyAttempt) {
             // 4401 recovery: re-mint the room token and reconnect through the same path.
             chat.onTokenExpired = { historyAttempt += 1 }
-            if let rt = try? await OllacoreAPI.shared.roomToken(token: sessionToken, roomId: room.room_id, deviceId: deviceId) {
+            do {
+                let rt = try await OllacoreAPI.shared.roomToken(token: sessionToken, roomId: room.room_id, deviceId: deviceId)
+                roomTokenError = nil
                 roomToken = rt.access_token; wsUrl = rt.chat_websocket_url
                 await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl, ownId: ownId, expiresAt: rt.expires_at)
                 if chat.historyError == nil { chat.markVisibleAsRead(roomId: room.room_id) }
+            } catch {
+                // NEW-08: token failures (401, timeout, malformed) surface with retry.
+                roomTokenError = error.localizedDescription
             }
         }
         .onDisappear { chat.disconnect() }

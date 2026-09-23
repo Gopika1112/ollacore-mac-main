@@ -104,7 +104,10 @@ public final class OllacoreAPI {
     private func fire(_ r: URLRequest) async -> Bool {
         do {
             let (_, resp) = try await session.data(for: r)
-            return (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            // NEW-07: fire-and-forget paths must not swallow session death.
+            if status == 401 { NotificationCenter.default.post(name: .ollacoreUnauthorized, object: nil) }
+            return (200..<300).contains(status)
         } catch { return false }
     }
 

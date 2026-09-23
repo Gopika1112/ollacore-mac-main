@@ -205,6 +205,9 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
             onEvent?(.error("Malformed RTC WebSocket URL."))
             return
         }
+        // Never stack sockets: a repeated connect retires the previous task/loop first.
+        task?.cancel(with: .normalClosure, reason: nil)
+        task = nil
         var r = URLRequest(url: wsURL); r.setValue("chatbox, bearer.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
         task = URLSession(configuration: .default, delegate: self, delegateQueue: .main).webSocketTask(with: r)
         task?.resume(); listen(); onEvent?(.connected)
