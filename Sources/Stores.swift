@@ -338,7 +338,10 @@ public struct FailedDraft: Identifiable {
         for id in selectedIds { deleteMessage(roomId: roomId, messageId: id) }
         clearSelection()
     }
-    public func disconnect() { socket.disconnect() }
+    public func disconnect() {
+        joinGen += 1 // invalidate any in-flight join: it must not connect after the view is gone
+        socket.disconnect()
+    }
     public func addReaction(roomId: String, messageId: String, emoji: String) {
         socket.addReaction(roomId: roomId, messageId: messageId, emoji: emoji)
         Task { _ = await api.addReaction(roomToken: currentToken, roomId: roomId, messageId: messageId, emoji: emoji) }
@@ -405,7 +408,8 @@ public struct FailedDraft: Identifiable {
             if gen == generation { results = found }
         } catch let e as ApiException where e.isRateLimited {
             // Honor Retry-After: keep prior results, caller may retry after delay.
-            try? await Task.sleep(nanoseconds: UInt64(max(0, e.retryAfterSeconds ?? 2)) * 1_000_000_000)
+            // Clamped both ends: negatives can't trap, huge values can't stall past 60s.
+            try? await Task.sleep(nanoseconds: UInt64(min(max(0, e.retryAfterSeconds ?? 2), 60)) * 1_000_000_000)
             guard gen == generation, !Task.isCancelled else { return }
             if let retry = try? await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query),
                gen == generation, !Task.isCancelled { results = retry }
@@ -449,9 +453,14 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
         }
     }
     private static func quarantine(_ d: Data) {
-        let stamp = Int(Date().timeIntervalSince1970 * 1000)
-        let nonce = Int.random(in: 0..<100000)
-        UserDefaults.standard.set(d, forKey: "\(corruptPrefix)_\(stamp)_\(nonce)")
+        // Never overwrite: regenerate until the key is actually unused.
+        var key = ""
+        repeat {
+            let stamp = Int(Date().timeIntervalSince1970 * 1000)
+            let nonce = Int.random(in: 0..<100000)
+            key = "\(corruptPrefix)_\(stamp)_\(nonce)"
+        } while UserDefaults.standard.object(forKey: key) != nil
+        UserDefaults.standard.set(d, forKey: key)
         let olds = UserDefaults.standard.dictionaryRepresentation().keys
             .filter { $0.hasPrefix(corruptPrefix) }.sorted()
         for extra in olds.dropLast(maxBackups) {

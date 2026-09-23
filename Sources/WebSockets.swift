@@ -48,8 +48,10 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         pingTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: true) { [weak self] _ in self?.ping() }
     }
     private func listen() {
-        task?.receive { [weak self] res in
-            guard let self else { return }
+        // Bind the loop to this task: a replaced socket's stale callbacks die here.
+        guard let task else { return }
+        task.receive { [weak self, weak task] res in
+            guard let self, let task, task === self.task else { return }
             switch res {
             case .success(.string(let text)):
                 if let d = text.data(using: .utf8),
@@ -213,8 +215,9 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
         task?.resume(); listen(); onEvent?(.connected)
     }
     private func listen() {
-        task?.receive { [weak self] res in
-            guard let self else { return }
+        guard let task else { return }
+        task.receive { [weak self, weak task] res in
+            guard let self, let task, task === self.task else { return }
             switch res {
             case .success(.string(let t)):
                 if let d = t.data(using: .utf8),

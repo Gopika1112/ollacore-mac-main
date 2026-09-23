@@ -256,6 +256,8 @@ struct ChatDetailView: View {
                 roomToken = rt.access_token; wsUrl = rt.chat_websocket_url
                 await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl, ownId: ownId, expiresAt: rt.expires_at)
                 if chat.historyError == nil { chat.markVisibleAsRead(roomId: room.room_id) }
+            } catch is CancellationError {
+                // View left or superseded: stay silent, never stain the UI.
             } catch {
                 // NEW-08: token failures (401, timeout, malformed) surface with retry.
                 roomTokenError = error.localizedDescription

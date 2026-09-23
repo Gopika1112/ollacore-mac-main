@@ -118,6 +118,49 @@ import XCTest
         vm.disconnect()
     }
 
+    func testDisconnectCancelsInflightJoin() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            Thread.sleep(forTimeInterval: 0.3)
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(#"{"messages":[],"has_more":false}"#.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        async let j: Void = vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        for _ in 0..<5 { await Task.yield() }
+        vm.disconnect()
+        await j.value
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(vm.socket.isConnected)
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertNil(vm.historyError)
+        XCTAssertFalse(vm.historyLoaded)
+    }
+
+    func testHugeRetryAfterCapped() async {
+        var calls = 0
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            calls += 1
+            if calls == 1 {
+                let resp = HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "999999"])!
+                return (resp, Data(#"{"code":"rate_limited","message":"slow"}"#.utf8))
+            }
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(#"{"messages":[],"has_more":false}"#.utf8))
+        }
+        let vm = RoomSearchViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        RoomTokenCache.shared.set(roomId: "r", token: "t", wsURL: "w", rtcURL: "c", expiresAt: "2999-01-01T00:00:00Z")
+        let start = Date()
+        await vm.search(roomId: "r", query: "q")
+        // One capped 60s wait + one retry: far sooner than the 999999s demanded.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 90)
+        XCTAssertEqual(calls, 2)
+        RoomTokenCache.shared.clear()
+    }
+
     func testRoomSwitchResetsState() async throws {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]
