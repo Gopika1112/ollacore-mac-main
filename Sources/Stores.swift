@@ -154,6 +154,7 @@ public struct FailedDraft: Identifiable {
     public init(api: OllacoreAPI = .shared) { self.api = api }
     private var seenIds: Set<String> = []
     private var joinGen = 0
+    private var socketSession = 0
     private var currentRoom = "", currentToken = ""
     /// ST-01: bound in-memory history so long sessions can't grow without limit.
     public var maxRetainedMessages = 300
@@ -197,12 +198,17 @@ public struct FailedDraft: Identifiable {
             return
         }
         RoomTokenCache.shared.set(roomId: roomId, token: roomToken, wsURL: wsUrl, rtcURL: "", expiresAt: expiresAt)
+        socketSession += 1
+        let sess = socketSession
         socket.onSendFailure = { [weak self] reqId in
-            Task { @MainActor in self?.failPending(requestId: reqId) }
+            Task { @MainActor in
+                guard let self, self.socketSession == sess else { return }
+                self.failPending(requestId: reqId)
+            }
         }
         socket.onEvent = { [weak self] e in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.socketSession == sess else { return } // NEW-14: queued event after disconnect dies here
                 switch e {
                 case .messageCreated(let m):
                     guard self.isCurrentRoom(m.room_id) else { break } // cross-room events never apply
@@ -306,9 +312,12 @@ public struct FailedDraft: Identifiable {
     /// Paging for long chats: prepends older messages (deduplicated), newest stay put.
     public func loadMore() async {
         guard historyLoaded, hasMoreHistory, !currentRoom.isEmpty, let oldest = messages.map(\.event_seq).min() else { return }
+        let gen = joinGen
+        let room = currentRoom, token = currentToken
         isLoadingMore = true
-        defer { isLoadingMore = false }
-        guard let page = try? await api.listMessages(roomToken: currentToken, roomId: currentRoom, beforeSeq: oldest) else { return }
+        defer { if gen == joinGen { isLoadingMore = false } }
+        guard let page = try? await api.listMessages(roomToken: token, roomId: room, beforeSeq: oldest) else { return }
+        guard gen == joinGen, room == currentRoom else { return } // NEW-15: stale page never lands
         for m in page.messages where !seenIds.contains(m.id) && m.room_id == currentRoom {
             seenIds.insert(m.id)
             messages.append(m)
@@ -346,6 +355,7 @@ public struct FailedDraft: Identifiable {
     }
     public func disconnect() {
         joinGen += 1 // invalidate any in-flight join: it must not connect after the view is gone
+        socketSession += 1 // orphan already-queued socket callbacks with the old session id
         socket.disconnect()
     }
     public func addReaction(roomId: String, messageId: String, emoji: String) {
@@ -528,8 +538,12 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
             UserDefaults.standard.removeObject(forKey: Self.key)
         }
     }
+    private static let quarantineLock = NSLock()
     private static func quarantine(_ d: Data) {
-        // Never overwrite: regenerate until the key is actually unused.
+        // Atomic check-and-write: the whole transaction holds one lock, so two
+        // concurrent corruptions can never observe-and-claim the same key.
+        quarantineLock.lock()
+        defer { quarantineLock.unlock() }
         var key = ""
         repeat {
             let stamp = Int(Date().timeIntervalSince1970 * 1000)

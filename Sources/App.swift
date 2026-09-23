@@ -283,6 +283,8 @@ struct ChatDetailView: View {
                 if chat.historyError == nil { chat.markVisibleAsRead(roomId: room.room_id) }
             } catch is CancellationError {
                 // View left or superseded: stay silent, never stain the UI.
+            } catch let e as URLError where e.code == .cancelled {
+                // URLSession surfaces cancellation this way, not as CancellationError.
             } catch {
                 // NEW-08: token failures (401, timeout, malformed) surface with retry.
                 roomTokenError = error.localizedDescription

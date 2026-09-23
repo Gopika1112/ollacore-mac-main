@@ -188,6 +188,44 @@ import XCTest
         RoomTokenCache.shared.clear()
     }
 
+    func testQueuedEventAfterDisconnectIgnored() async throws {
+        let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        let m1 = try msg("m1", seq: 1)
+        vm.socket.onEvent?(.messageCreated(m1))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.messages.count, 1)
+        vm.disconnect()
+        let m2 = try JSONDecoder().decode(MessageResponse.self, from: Data(#"{"id":"m2","room_id":"r","sender_id":"u","kind":"text","body":{"text":"late"},"created_at":"t","event_seq":2}"#.utf8))
+        vm.socket.onEvent?(.messageCreated(m2)) // stale queued callback: must die
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.messages.count, 1)
+        XCTAssertEqual(vm.messages.first?.id, "m1")
+    }
+
+    func testLoadMoreAfterRoomSwitchIgnored() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let url = req.url!.absoluteString
+            if url.contains("before_seq") { Thread.sleep(forTimeInterval: 0.3) }
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let room = url.contains("/rooms/A/") ? "A" : "B"
+            let body = url.contains("before_seq")
+                ? #"{"messages":[{"id":"m0-\#(room)","room_id":"\#(room)","sender_id":"u","kind":"text","body":{"text":"old"},"created_at":"t","event_seq":0}],"has_more":false}"#
+                : #"{"messages":[{"id":"m1-\#(room)","room_id":"\#(room)","sender_id":"u","kind":"text","body":{"text":"new"},"created_at":"t","event_seq":1}],"has_more":true}"#
+            return (resp, Data(body.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        await vm.join(roomToken: "t", roomId: "A", wsUrl: "ws://invalid", ownId: "u")
+        async let lm: Void = vm.loadMore()
+        await vm.join(roomToken: "t", roomId: "B", wsUrl: "ws://invalid", ownId: "u")
+        await lm.value
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.messages.map(\.id), ["m1-B"]) // A's older page never lands in B
+        vm.disconnect()
+    }
+
     func testRoomSwitchResetsState() async throws {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]
