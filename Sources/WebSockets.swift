@@ -25,7 +25,9 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
 
     public func connect(url: String, token: String, isReconnect: Bool = false) {
         // Token is never in the query string (would leak to logs) — subprotocol only.
-        guard let wsURL = URL(string: url), wsURL.scheme?.lowercased().hasPrefix("ws") == true else {
+        guard let wsURL = URL(string: url),
+              ["ws", "wss"].contains(wsURL.scheme?.lowercased() ?? ""),
+              !(wsURL.host?.isEmpty ?? true) else {
             onEvent?(.error(code: "invalid_url", message: "Malformed chat WebSocket URL.", requestId: nil))
             return
         }
@@ -123,8 +125,12 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
             onSendFailure?(reqId)
             return reqId
         }
-        // No task (not connected): leave pending; ack/error correlation settles it after connect.
-        task?.send(.string(s)) { [weak self] err in
+        guard let task else {
+            // Disconnected: fail fast so the UI shows Retry instead of a stuck "sending".
+            onSendFailure?(reqId)
+            return reqId
+        }
+        task.send(.string(s)) { [weak self] err in
             if err != nil { self?.onSendFailure?(reqId) }
         }
         return reqId
@@ -193,7 +199,9 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
     private var task: URLSessionWebSocketTask?
     public var onEvent: ((RtcEvent) -> Void)?
     public func connect(url: String, token: String) {
-        guard let wsURL = URL(string: url), wsURL.scheme?.lowercased().hasPrefix("ws") == true else {
+        guard let wsURL = URL(string: url),
+              ["ws", "wss"].contains(wsURL.scheme?.lowercased() ?? ""),
+              !(wsURL.host?.isEmpty ?? true) else {
             onEvent?(.error("Malformed RTC WebSocket URL."))
             return
         }

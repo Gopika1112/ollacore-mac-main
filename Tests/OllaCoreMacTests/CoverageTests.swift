@@ -172,6 +172,16 @@ import XCTest
         XCTAssertTrue(s.contains("r%20%25%3F/%C3%BC") || s.contains("r%20%25%3F%2F%C3%BC"), s)
     }
 
+    func testWsxSchemeRejected() {
+        var got: ChatEvent?
+        let ws = ChatWebSocket()
+        ws.onEvent = { got = $0 }
+        ws.connect(url: "wsx://example.com/chat", token: "t")
+        XCTAssertFalse(ws.isConnected)
+        if case .error(let code, _, _) = got { XCTAssertEqual(code, "invalid_url") }
+        else { XCTFail("expected invalid_url") }
+    }
+
     func testCredentialNeverInQuery() {
         XCTAssertTrue(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?access_token=x")!))
         XCTAssertTrue(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?api_key=x")!))

@@ -48,12 +48,16 @@ import SwiftUI
     @Published public var avatarUrl: String?
     public let session = SessionStore()
     private let api: OllacoreAPI
+    private var authObserver: NSObjectProtocol?
     public init(api: OllacoreAPI = .shared) {
         self.api = api
         if session.isAuthenticated { step = .authenticated }
-        NotificationCenter.default.addObserver(forName: .ollacoreUnauthorized, object: nil, queue: .main) { [weak self] _ in
+        authObserver = NotificationCenter.default.addObserver(forName: .ollacoreUnauthorized, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.handleUnauthorized() }
         }
+    }
+    deinit {
+        if let t = authObserver { NotificationCenter.default.removeObserver(t) }
     }
     /// Central 401 handling: a dead credential signs out everywhere at once, never stranded.
     public func handleUnauthorized() {
@@ -165,6 +169,10 @@ public struct FailedDraft: Identifiable {
         currentRoom = roomId; currentToken = roomToken
         connectionError = nil; accessRevoked = false
         historyError = nil; historyLoaded = false
+        // Per-room state never carries over: a recycled VM starts clean.
+        receipts.removeAll(); reactions.removeAll()
+        failedDrafts.removeAll(); pendingFrames.removeAll(); sendingCount = 0
+        selectedIds.removeAll(); selectionMode = false
         do {
             let hist = try await api.listMessages(roomToken: roomToken, roomId: roomId)
             guard gen == joinGen else { return } // superseded by a newer join: publish nothing
@@ -185,6 +193,7 @@ public struct FailedDraft: Identifiable {
                 guard let self else { return }
                 switch e {
                 case .messageCreated(let m):
+                    guard self.isCurrentRoom(m.roomId) else { break } // cross-room events never apply
                     guard !self.seenIds.contains(m.id) else { break } // duplicate prevention
                     self.seenIds.insert(m.id)
                     self.messages.append(m)
@@ -195,8 +204,10 @@ public struct FailedDraft: Identifiable {
                         if let cid = m.client_message_id { self.clearPending(clientId: cid) }
                     }
                 case .messageUpdated(let m):
+                    guard self.isCurrentRoom(m.roomId) else { break }
                     if let i = self.messages.firstIndex(where: { $0.id == m.id }) { self.messages[i] = m }
-                case .messageDeleted(_, let id):
+                case .messageDeleted(let room, let id):
+                    guard self.isCurrentRoom(room) else { break }
                     // Tombstone: keep the row so history doesn't look corrupted.
                     self.deletedIds.insert(id)
                     self.reactions.removeValue(forKey: id)
@@ -206,19 +217,25 @@ public struct FailedDraft: Identifiable {
                 case .error(let code, let msg, let reqId):
                     if code == "rate_limited" { self.rateLimitedNotice = msg }
                     if let reqId { self.failPending(requestId: reqId) }
-                case .receiptDelivered(_, let id): self.receipts[id] = .delivered
-                case .receiptRead(_, let id): self.receipts[id] = .read
-                case .reactionAdded(_, let id, let emoji):
+                case .receiptDelivered(let room, let id):
+                    guard self.isCurrentRoom(room) else { break }; self.receipts[id] = .delivered
+                case .receiptRead(let room, let id):
+                    guard self.isCurrentRoom(room) else { break }; self.receipts[id] = .read
+                case .reactionAdded(let room, let id, let emoji):
+                    guard self.isCurrentRoom(room) else { break }
                     var m = self.reactions[id] ?? [:]; m[emoji, default: 0] += 1; self.reactions[id] = m
-                case .reactionRemoved(_, let id, let emoji):
+                case .reactionRemoved(let room, let id, let emoji):
+                    guard self.isCurrentRoom(room) else { break }
                     var m = self.reactions[id] ?? [:]
                     m[emoji, default: 1] -= 1
                     if (m[emoji] ?? 0) <= 0 { m.removeValue(forKey: emoji) }
                     self.reactions[id] = m.isEmpty ? nil : m
-                case .callStarted(_, let callId):
+                case .callStarted(let room, let callId):
+                    guard self.isCurrentRoom(room) else { break }
                     // Banner only: in-call audio/video UI is not built; never fake an answered call.
                     self.activeCall = (callId, "")
-                case .callEnded: self.activeCall = nil
+                case .callEnded(let room, _):
+                    guard self.isCurrentRoom(room) else { break }; self.activeCall = nil
                 case .tokenExpired:
                     self.connectionError = "Session expired. Reopen the chat to reconnect."
                     self.onTokenExpired?()
@@ -239,6 +256,7 @@ public struct FailedDraft: Identifiable {
         sendingCount = pendingFrames.count
         failedDrafts.removeAll { $0.id == clientId }
     }
+    private func isCurrentRoom(_ room: String) -> Bool { room == currentRoom }
     private func failPending(requestId: String) {
         guard let p = pendingFrames.removeValue(forKey: requestId) else { return }
         sendingCount = pendingFrames.count

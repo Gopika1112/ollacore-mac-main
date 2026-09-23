@@ -33,6 +33,23 @@ import XCTest
         vm.disconnect()
     }
 
+    func testCrossRoomEventsIgnored() async throws {
+        let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
+        await vm.join(roomToken: "t", roomId: "A", wsUrl: "ws://invalid", ownId: "u")
+        let other = try JSONDecoder().decode(MessageResponse.self, from: Data(#"{"id":"mx","room_id":"B","sender_id":"u","kind":"text","body":{"text":"x"},"created_at":"t","event_seq":1}"#.utf8))
+        vm.socket.onEvent?(.messageCreated(other))
+        vm.socket.onEvent?(.receiptRead(roomId: "B", messageId: "mx"))
+        vm.socket.onEvent?(.reactionAdded(roomId: "B", messageId: "mx", emoji: "👍"))
+        vm.socket.onEvent?(.messageDeleted(roomId: "B", messageId: "mx"))
+        vm.socket.onEvent?(.callStarted(roomId: "B", callId: "c9"))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertTrue(vm.reactions.isEmpty)
+        XCTAssertNil(vm.activeCall)
+        XCTAssertFalse(vm.deletedIds.contains("mx"))
+        vm.disconnect()
+    }
+
     func testRoomSwitchResetsState() async throws {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]
@@ -59,10 +76,8 @@ import XCTest
         let rid = vm.send(roomId: "r", text: long)
         for _ in 0..<20 { await Task.yield() }
         XCTAssertFalse(rid.isEmpty)
-        XCTAssertEqual(vm.sendingCount, 1)
-        vm.socket.onEvent?(.ack(rid))
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertEqual(vm.sendingCount, 0)
+        XCTAssertEqual(vm.failedDrafts.count, 1) // disconnected: fail-fast draft
+        XCTAssertEqual(vm.failedDrafts.first?.text.count, 5000)
         vm.disconnect()
     }
 
@@ -76,20 +91,18 @@ import XCTest
     func testSendAckErrorRetryFlow() async throws {
         let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
         await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        // Disconnected socket: send fails fast into a retryable draft (R-02).
         let rid = vm.send(roomId: "r", text: "hello")
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertEqual(vm.sendingCount, 1)
+        XCTAssertEqual(vm.failedDrafts.count, 1)
+        XCTAssertEqual(vm.sendingCount, 0)
+        // A late ack for the failed frame changes nothing.
         vm.socket.onEvent?(.ack(rid))
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertEqual(vm.sendingCount, 0)
-        let rid2 = vm.send(roomId: "r", text: "again")
-        for _ in 0..<20 { await Task.yield() }
-        vm.socket.onEvent?(.error(code: "send_failed", message: "x", requestId: rid2))
-        for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(vm.failedDrafts.count, 1)
-        // Server echo with same client id clears pending + failed.
+        // Server echo with same client id clears the failed draft.
         let cid = vm.failedDrafts.first!.id
-        let d = Data(#"{"id":"m9","room_id":"r","sender_id":"u","kind":"text","body":{"text":"again"},"created_at":"t","event_seq":9,"client_message_id":"\#(cid)"}"#.utf8)
+        let d = Data(#"{"id":"m9","room_id":"r","sender_id":"u","kind":"text","body":{"text":"hello"},"created_at":"t","event_seq":9,"client_message_id":"\#(cid)"}"#.utf8)
         let m = try JSONDecoder().decode(MessageResponse.self, from: d)
         vm.socket.onEvent?(.messageCreated(m))
         for _ in 0..<20 { await Task.yield() }
@@ -140,7 +153,8 @@ import XCTest
         vm.socket.onEvent?(.callEnded(roomId: "r", callId: "c1"))
         vm.socket.onEvent?(.messageDeleted(roomId: "r", messageId: "m1"))
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertEqual(vm.messages.count, 1) // tombstone: row kept, rendered as deleted
+        XCTAssertTrue(vm.deletedIds.contains("m1"))
         XCTAssertNil(vm.reactions["m1"])
         XCTAssertNil(vm.activeCall)
         vm.disconnect()
