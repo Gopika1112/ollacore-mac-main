@@ -23,13 +23,15 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public private(set) var highestSeqByRoom: [String: Int] = [:]
     private var pingTimer: Timer?
 
-    public func connect(url: String, token: String) {
+    public func connect(url: String, token: String, isReconnect: Bool = false) {
         // Token is never in the query string (would leak to logs) — subprotocol only.
         guard let wsURL = URL(string: url), wsURL.scheme?.lowercased().hasPrefix("ws") == true else {
             onEvent?(.error(code: "invalid_url", message: "Malformed chat WebSocket URL.", requestId: nil))
             return
         }
         lastURL = url; lastToken = token
+        if !isReconnect { reconnectAttempts = 0 } // fresh explicit connect restarts the cycle
+        reconnectWork?.cancel(); reconnectWork = nil
         var r = URLRequest(url: wsURL)
         r.setValue("chatbox, bearer.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
         let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
@@ -172,13 +174,14 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         }
     }
     private func scheduleReconnect() {
-        cancelReconnect()
+        reconnectWork?.cancel(); reconnectWork = nil // keep the attempt count: the cap must trip
         guard reconnectAttempts < 5, let url = lastURL, let token = lastToken else {
+            reconnectAttempts = 0
             onEvent?(.disconnected(code: 1001)); return
         }
         reconnectAttempts += 1
         let delay = min(30.0, pow(2.0, Double(reconnectAttempts))) + Double.random(in: 0..<1)
-        let work = DispatchWorkItem { [weak self] in self?.connect(url: url, token: token) }
+        let work = DispatchWorkItem { [weak self] in self?.connect(url: url, token: token, isReconnect: true) }
         reconnectWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }

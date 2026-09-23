@@ -149,6 +149,7 @@ public struct FailedDraft: Identifiable {
     private let api: OllacoreAPI
     public init(api: OllacoreAPI = .shared) { self.api = api }
     private var seenIds: Set<String> = []
+    private var joinGen = 0
     private var currentRoom = "", currentToken = ""
     public var ownId: String?
     @Published public var historyError: String?
@@ -159,11 +160,14 @@ public struct FailedDraft: Identifiable {
         socket.disconnect()
         socket.onEvent = nil
         socket.onSendFailure = nil
+        joinGen += 1
+        let gen = joinGen
         currentRoom = roomId; currentToken = roomToken
         connectionError = nil; accessRevoked = false
         historyError = nil; historyLoaded = false
         do {
             let hist = try await api.listMessages(roomToken: roomToken, roomId: roomId)
+            guard gen == joinGen else { return } // superseded by a newer join: publish nothing
             messages = hist.sorted { $0.event_seq < $1.event_seq }
             seenIds = Set(messages.map(\.id))
             historyLoaded = true

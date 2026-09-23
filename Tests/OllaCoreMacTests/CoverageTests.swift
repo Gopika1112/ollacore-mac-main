@@ -56,11 +56,11 @@ import XCTest
     }
 
     func testBadBaseFallsBackWithoutCrash() {
+        OllacoreAPI.testBaseOverride = ":::bad:::"
+        defer { OllacoreAPI.testBaseOverride = nil }
         let api = OllacoreAPI(session: URLSession(configuration: .ephemeral))
-        api.apiBase = ":::not a url:::"
         let u = api.url(path: "directory/inbox", query: [URLQueryItem(name: "limit", value: "30")])
         XCTAssertTrue(u.absoluteString.contains("directory/inbox"))
-        api.apiBase = AppConfig.apiBase
     }
 
     func testFireReportsFailure() async {
@@ -110,6 +110,8 @@ import XCTest
         XCTAssertNil(RoomTokenCache.shared.get(roomId: "r"))
         RoomTokenCache.shared.set(roomId: "r", token: "fresh", wsURL: "w", rtcURL: "c", expiresAt: "2999-01-01T00:00:00Z")
         XCTAssertEqual(RoomTokenCache.shared.get(roomId: "r")?.token, "fresh")
+        RoomTokenCache.shared.set(roomId: "r", token: "bad", wsURL: "w", rtcURL: "c", expiresAt: "not-a-date")
+        XCTAssertNil(RoomTokenCache.shared.get(roomId: "r"))
         RoomTokenCache.shared.clear()
     }
 

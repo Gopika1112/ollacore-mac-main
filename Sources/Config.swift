@@ -15,7 +15,8 @@ public enum AppConfig {
     }
     static func isAllowedBase(_ s: String) -> Bool {
         guard let c = URLComponents(string: s),
-              let host = c.host?.lowercased() else { return false }
+              let host = c.host?.lowercased(),
+              ["http", "https"].contains(c.scheme?.lowercased() ?? "") else { return false }
         // Local development against a self-hosted backend stays possible over plain http.
         if host == "localhost" || host == "127.0.0.1" { return true }
         guard c.scheme?.lowercased() == "https" else { return false }

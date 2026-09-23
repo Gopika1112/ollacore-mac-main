@@ -112,6 +112,12 @@ struct HomeView: View {
                     searchTask = Task { await roomSearch.search(roomId: room.room_id, query: q, sessionToken: auth.session.sessionToken, deviceId: auth.session.deviceId) }
                 }
             }
+            .onChange(of: selectedRoom) {
+                // New room, stale search: cancel in-flight work and drop its results.
+                searchTask?.cancel()
+                roomSearch.cancel()
+                roomSearch.results = []
+            }
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItemGroup {

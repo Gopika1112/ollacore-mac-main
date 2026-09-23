@@ -59,7 +59,9 @@ public final class RoomTokenCache {
     }
     public func set(roomId: String, token: String, wsURL: String, rtcURL: String, expiresAt: String? = nil) {
         lock.lock(); defer { lock.unlock() }
-        let exp = expiresAt.flatMap { ISO8601DateFormatter().date(from: $0) }
+        // A present-but-unparseable expiry is treated as already expired (fail
+        // closed): better one re-mint than a token that never expires.
+        let exp: Date? = expiresAt.map { ISO8601DateFormatter().date(from: $0) ?? .distantPast }
         cache[roomId] = (token, wsURL, rtcURL, exp)
     }
     public func clear() { lock.lock(); defer { lock.unlock() }; cache.removeAll() }

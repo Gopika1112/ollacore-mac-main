@@ -16,7 +16,9 @@ public extension Notification.Name {
 /// Mirrors Android OllacoreApi.kt — directory plane (session token) + client plane (room token).
 public final class OllacoreAPI {
     public static let shared = OllacoreAPI()
-    public var apiBase = AppConfig.apiBase
+    /// Test seam: synchronous, auditable, and resettable — unlike a mutable base URL.
+    public static var testBaseOverride: String?
+    public var apiBase: String { Self.testBaseOverride ?? AppConfig.apiBase }
     public var appId: String { AppConfig.appId }
     private let session: URLSession
     /// Explicit timeouts (30s request, 60s resource) instead of invisible system defaults.
