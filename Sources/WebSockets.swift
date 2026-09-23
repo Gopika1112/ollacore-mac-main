@@ -106,7 +106,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         }
         return reqId
     }
-    public func catchup(roomId: String, afterSeq: Int, limit: Int = 200) { send(type: "catchup", payload: ["after_seq": afterSeq, "limit": limit]) }
+    public func catchup(roomId: String, afterSeq: Int, limit: Int = 200) { send(type: "catchup", roomId: roomId, payload: ["after_seq": afterSeq, "limit": limit]) }
     public func ping() { send(type: "ping") }
     /// Idempotent send: reuse `clientId` on retry so the server dedupes (never mint a fresh id per retry).
     @discardableResult

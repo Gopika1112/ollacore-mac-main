@@ -16,13 +16,21 @@ public final class OllacoreAPI {
     public init(session: URLSession = .shared) { self.session = session }
     private let json = JSONEncoder()
 
-    /// URL builder: path segments percent-encoded, query via URLQueryItem — never manual concatenation.
+    /// Segment encoder: "/" is NOT allowed inside a dynamic value (room/message ids).
+    private static var segmentAllowed: CharacterSet {
+        CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
+    }
+    /// URL builder for static paths (no dynamic values): split on "/" is safe.
     /// `path` is relative to apiBase (e.g. "directory/inbox"), without leading "/v1".
     func url(path: String, query: [URLQueryItem] = []) -> URL {
+        url(segments: path.split(separator: "/").map(String.init), query: query)
+    }
+    /// URL builder for paths with dynamic values: each segment encoded as ONE
+    /// component, so an id like "r/1" becomes "r%2F1" instead of two segments.
+    func url(segments: [String], query: [URLQueryItem] = []) -> URL {
         var c = URLComponents(string: apiBase) ?? URLComponents(string: "https://api.ollacore.com/v1")!
-        let basePath = c.path
-        let encoded = path.split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }.joined(separator: "/")
-        c.path = basePath + "/" + encoded
+        let encoded = segments.map { $0.addingPercentEncoding(withAllowedCharacters: Self.segmentAllowed) ?? $0 }.joined(separator: "/")
+        c.path = c.path + "/" + encoded
         c.queryItems = query.isEmpty ? nil : query
         return c.url ?? URL(string: "https://api.ollacore.com/v1/\(encoded)")!
     }
@@ -104,7 +112,7 @@ public final class OllacoreAPI {
         return try await exec(req("/directory/conversations/group", method: "POST", sessionToken: token, body: try enc(B(member_user_ids: members, name: name))))
     }
     public func roomToken(token: String, roomId: String, deviceId: String) async throws -> RoomTokenResponse {
-        try await exec(req(url: url(path: "directory/conversations/\(roomId)/token", query: [URLQueryItem(name: "device_id", value: deviceId)]), method: "GET", sessionToken: token))
+        try await exec(req(url: url(segments: ["directory", "conversations", roomId, "token"], query: [URLQueryItem(name: "device_id", value: deviceId)]), method: "GET", sessionToken: token))
     }
     public func lookupContacts(token: String, phones: [String]) async throws -> [ContactUser] {
         struct B: Encodable { var phones: [String] }; struct R: Decodable { var contacts: [ContactUser] }
@@ -118,44 +126,44 @@ public final class OllacoreAPI {
         var q: [URLQueryItem] = [URLQueryItem(name: "limit", value: "\(limit)")]
         if let a = afterSeq { q.append(URLQueryItem(name: "after_seq", value: "\(a)")) }
         if let b = beforeSeq { q.append(URLQueryItem(name: "before_seq", value: "\(b)")) }
-        let r: R = try await exec(req(url: url(path: "rooms/\(roomId)/messages", query: q), method: "GET", roomToken: roomToken))
+        let r: R = try await exec(req(url: url(segments: ["rooms", roomId, "messages"], query: q), method: "GET", roomToken: roomToken))
         return r.messages
     }
     public func sendMessage(roomToken: String, roomId: String, clientId: String, kind: String, body: [String: AnyCodable], replyTo: String? = nil, attachments: [String] = []) async throws -> MessageResponse {
         struct B: Encodable { var client_message_id: String; var kind: String; var body: [String: AnyCodable]; var reply_to: String?; var attachment_ids: [String] }
-        return try await exec(req("/rooms/\(roomId)/messages", method: "POST", roomToken: roomToken, body: try enc(B(client_message_id: clientId, kind: kind, body: body, reply_to: replyTo, attachment_ids: attachments))))
+        return try await exec(req(url: url(segments: ["rooms", roomId, "messages"]), method: "POST", roomToken: roomToken, body: try enc(B(client_message_id: clientId, kind: kind, body: body, reply_to: replyTo, attachment_ids: attachments))))
     }
     @discardableResult
     public func markRead(roomToken: String, roomId: String, messageId: String) async -> Bool {
-        await fire(req("/rooms/\(roomId)/messages/\(messageId)/read", method: "POST", roomToken: roomToken, body: Data()))
+        await fire(req(url: url(segments: ["rooms", roomId, "messages", messageId, "read"]), method: "POST", roomToken: roomToken, body: Data()))
     }
     /// Documented: POST /v1/rooms/{id}/messages/{messageId}/reactions {emoji}.
     @discardableResult
     public func addReaction(roomToken: String, roomId: String, messageId: String, emoji: String) async -> Bool {
         struct B: Encodable { var emoji: String }
         guard let body = try? enc(B(emoji: emoji)) else { return false }
-        return await fire(req("/rooms/\(roomId)/messages/\(messageId)/reactions", method: "POST", roomToken: roomToken, body: body))
+        return await fire(req(url: url(segments: ["rooms", roomId, "messages", messageId, "reactions"]), method: "POST", roomToken: roomToken, body: body))
     }
     /// Documented: DELETE /v1/rooms/{id}/messages/{messageId}/reactions {emoji}.
     @discardableResult
     public func removeReaction(roomToken: String, roomId: String, messageId: String, emoji: String) async -> Bool {
         struct B: Encodable { var emoji: String }
         guard let body = try? enc(B(emoji: emoji)) else { return false }
-        return await fire(req("/rooms/\(roomId)/messages/\(messageId)/reactions", method: "DELETE", roomToken: roomToken, body: body))
+        return await fire(req(url: url(segments: ["rooms", roomId, "messages", messageId, "reactions"]), method: "DELETE", roomToken: roomToken, body: body))
     }
     /// Documented: GET /v1/rooms/{id}/attachments/{attachmentId}/download → presigned URL.
     public func downloadAttachment(roomToken: String, roomId: String, attachmentId: String) async throws -> AttachmentDownloadResponse {
-        try await exec(req(url: url(path: "rooms/\(roomId)/attachments/\(attachmentId)/download"), method: "GET", roomToken: roomToken))
+        try await exec(req(url: url(segments: ["rooms", roomId, "attachments", attachmentId, "download"]), method: "GET", roomToken: roomToken))
     }
     /// Documented: DELETE /v1/rooms/{room_id}/messages/{message_id} (soft delete).
     @discardableResult
     public func deleteMessage(roomToken: String, roomId: String, messageId: String) async -> Bool {
-        await fire(req(url: url(path: "rooms/\(roomId)/messages/\(messageId)"), method: "DELETE", roomToken: roomToken))
+        await fire(req(url: url(segments: ["rooms", roomId, "messages", messageId]), method: "DELETE", roomToken: roomToken))
     }
     /// Documented endpoint: GET /v1/rooms/{room_id}/messages/search?q=&limit= (Client API).
     public func searchMessages(roomToken: String, roomId: String, q: String, limit: Int = 20) async throws -> [MessageResponse] {
         struct R: Decodable { var messages: [MessageResponse]; var has_more: Bool }
-        let r: R = try await exec(req(url: url(path: "rooms/\(roomId)/messages/search", query: [URLQueryItem(name: "q", value: q), URLQueryItem(name: "limit", value: "\(limit)")]), method: "GET", roomToken: roomToken))
+        let r: R = try await exec(req(url: url(segments: ["rooms", roomId, "messages", "search"], query: [URLQueryItem(name: "q", value: q), URLQueryItem(name: "limit", value: "\(limit)")]), method: "GET", roomToken: roomToken))
         return r.messages
     }
 
