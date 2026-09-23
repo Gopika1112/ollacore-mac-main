@@ -172,6 +172,14 @@ import XCTest
         XCTAssertTrue(s.contains("r%20%25%3F/%C3%BC") || s.contains("r%20%25%3F%2F%C3%BC"), s)
     }
 
+    func testRtcSendFailureSurfaced() {
+        var fired = false
+        let rtc = RtcWebSocket()
+        rtc.onSendFailure = { fired = true }
+        rtc.sendOffer(sdp: "v=0") // disconnected: nothing to send on
+        XCTAssertTrue(fired)
+    }
+
     func testWsxSchemeRejected() {
         var got: ChatEvent?
         let ws = ChatWebSocket()

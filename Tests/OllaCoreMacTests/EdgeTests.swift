@@ -43,14 +43,22 @@ import XCTest
         XCTAssertTrue(store.entries.isEmpty)
     }
 
+    private func corruptKeys() -> [String] {
+        UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix("call_log_corrupt_backup") }
+    }
+
     func testCorruptCallLogQuarantined() {
         UserDefaults.standard.set(Data("garbage".utf8), forKey: "call_log_v1")
         UserDefaults.standard.set(1, forKey: "call_log_version")
         let store = CallLogStore()
         XCTAssertTrue(store.entries.isEmpty)
-        XCTAssertNotNil(UserDefaults.standard.data(forKey: "call_log_corrupt_backup"))
+        XCTAssertEqual(corruptKeys().count, 1)
         XCTAssertNil(UserDefaults.standard.data(forKey: "call_log_v1"))
-        UserDefaults.standard.removeObject(forKey: "call_log_corrupt_backup")
+        // A second corruption event keeps its own backup instead of overwriting.
+        UserDefaults.standard.set(Data("garbage2".utf8), forKey: "call_log_v1")
+        _ = CallLogStore()
+        XCTAssertEqual(corruptKeys().count, 2)
+        for k in corruptKeys() { UserDefaults.standard.removeObject(forKey: k) }
     }
 
     func testDeviceIdStable() {

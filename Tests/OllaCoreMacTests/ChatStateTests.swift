@@ -92,6 +92,32 @@ import XCTest
         vm.disconnect()
     }
 
+    func testStaleJoinFailureIgnored() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let url = req.url!.absoluteString
+            if url.contains("/rooms/A/") {
+                Thread.sleep(forTimeInterval: 0.3)
+                let resp = HTTPURLResponse(url: req.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+                return (resp, Data("{}".utf8))
+            }
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let room = url.contains("/rooms/B/") ? "B" : "?"
+            let body = #"{"messages":[{"id":"m-\#(room)","room_id":"\#(room)","sender_id":"u","kind":"text","body":{"text":"x"},"created_at":"t","event_seq":1}],"has_more":false}"#
+            return (resp, Data(body.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        async let j1: Void = vm.join(roomToken: "t", roomId: "A", wsUrl: "ws://invalid", ownId: "u")
+        async let j2: Void = vm.join(roomToken: "t", roomId: "B", wsUrl: "ws://invalid", ownId: "u")
+        _ = await (j1, j2)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(vm.historyError) // A's late failure must not stain B
+        XCTAssertTrue(vm.historyLoaded)
+        XCTAssertEqual(vm.messages.first?.id, "m-B")
+        vm.disconnect()
+    }
+
     func testRoomSwitchResetsState() async throws {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]

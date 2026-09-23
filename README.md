@@ -11,7 +11,8 @@ Native macOS SwiftUI chat client for Ollacore (directory + client planes, chat/R
   (server device registration identifies the installation), as does the
   memory-only room-token cache policy: short-lived room tokens are never
   written to disk. Call history is versioned (`call_log_v1`); corrupt data is
-  quarantined to `call_log_corrupt_backup` and the log restarts empty.
+  quarantined under timestamped `call_log_corrupt_backup_*` keys (newest five
+  kept) and the log restarts empty.
 - Secrets (`OLLACORE_APP_ID`, `SIM_URL`, `SIM_TOKEN`) come from the
   environment only and are never committed. See `.gitignore`.
 - **Token transport (S-02).** Session/room credentials travel in the

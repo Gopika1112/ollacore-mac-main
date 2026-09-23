@@ -183,12 +183,15 @@ public struct FailedDraft: Identifiable {
         do {
             let hist = try await api.listMessages(roomToken: roomToken, roomId: roomId)
             guard gen == joinGen else { return } // superseded by a newer join: publish nothing
+            historyError = nil // success clears any error left by an older join
             messages = hist.sorted { $0.event_seq < $1.event_seq }
             seenIds = Set(messages.map(\.id))
             enforceWindow()
             historyLoaded = true
         } catch {
             // Failed history: stay out of the socket and report, instead of an empty room.
+            // Guarded like the success path: a stale join's failure must not stain the new room.
+            guard gen == joinGen else { return }
             historyError = error.localizedDescription
             return
         }
@@ -414,7 +417,8 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
     static let storeVersion = 1
     private static let key = "call_log_v1"
     private static let versionKey = "call_log_version"
-    private static let corruptKey = "call_log_corrupt_backup"
+    private static let corruptPrefix = "call_log_corrupt_backup"
+    private static let maxBackups = 5
     @Published public var entries: [CallEntry] = []
     public init() {
         let v = UserDefaults.standard.integer(forKey: Self.versionKey)
@@ -430,9 +434,17 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
         if let e = try? JSONDecoder().decode([CallEntry].self, from: d) {
             entries = e
         } else {
-            // Corrupt data is quarantined (not deleted) and the log restarts empty.
-            UserDefaults.standard.set(d, forKey: Self.corruptKey)
+            // Corrupt data is quarantined under a timestamped key (rotated, newest
+            // kept) and the log restarts empty — repeats never overwrite history.
+            let stamp = Int(Date().timeIntervalSince1970 * 1000)
+            let nonce = Int.random(in: 0..<100000)
+            UserDefaults.standard.set(d, forKey: "\(Self.corruptPrefix)_\(stamp)_\(nonce)")
             UserDefaults.standard.removeObject(forKey: Self.key)
+            let olds = UserDefaults.standard.dictionaryRepresentation().keys
+                .filter { $0.hasPrefix(Self.corruptPrefix) }.sorted()
+            for extra in olds.dropLast(Self.maxBackups) {
+                UserDefaults.standard.removeObject(forKey: extra)
+            }
         }
     }
     public func add(_ e: CallEntry) { entries.insert(e, at: 0); persist() }

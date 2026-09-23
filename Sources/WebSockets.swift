@@ -240,7 +240,17 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
         send(["cmd": "candidate", "candidate": ["candidate": candidate, "sdpMid": sdpMid, "sdpMLineIndex": sdpMLineIndex]])
     }
     public func leave() { send(["cmd": "leave"]) }
-    private func send(_ f: [String: Any]) {
-        if let d = try? JSONSerialization.data(withJSONObject: f), let s = String(data: d, encoding: .utf8) { task?.send(.string(s)) { _ in } }
+    /// Fires when signalling couldn't leave the device (disconnected or transport error).
+    public var onSendFailure: (() -> Void)?
+    private func send(_ f: [String: Any], describe: String = "frame") {
+        guard let d = try? JSONSerialization.data(withJSONObject: f),
+              let s = String(data: d, encoding: .utf8),
+              let task else {
+            onSendFailure?()
+            return
+        }
+        task.send(.string(s)) { [weak self] err in
+            if err != nil { self?.onSendFailure?() }
+        }
     }
 }
