@@ -220,11 +220,11 @@ struct ChatDetailView: View {
                             forwardDone = await chat.forwardMessage(msg, toRoomId: r.room_id, sessionToken: sessionToken, deviceId: deviceId)
                                 ? "Forwarded to \(r.name ?? r.room_id)" : "Forward failed"
                         }
-                        forwarding = nil
                     }
+                    .disabled(forwardDone != nil)
                 }.frame(minHeight: 200)
                 if let done = forwardDone { Text(done).font(.caption).foregroundColor(.secondary) }
-                Button("Cancel") { forwarding = nil }
+                Button(forwardDone == nil ? "Cancel" : "Done") { forwarding = nil; forwardDone = nil }
             }.padding().frame(width: 340)
         }
     }
