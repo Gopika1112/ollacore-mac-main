@@ -162,13 +162,13 @@ public final class OllacoreAPI {
     }
 
     // Messages (room token)
-    public func listMessages(roomToken: String, roomId: String, limit: Int = 50, afterSeq: Int? = nil, beforeSeq: Int? = nil) async throws -> [MessageResponse] {
+    public func listMessages(roomToken: String, roomId: String, limit: Int = 50, afterSeq: Int? = nil, beforeSeq: Int? = nil) async throws -> MessagePage {
         struct R: Decodable { var messages: [MessageResponse]; var has_more: Bool }
         var q: [URLQueryItem] = [URLQueryItem(name: "limit", value: "\(limit)")]
         if let a = afterSeq { q.append(URLQueryItem(name: "after_seq", value: "\(a)")) }
         if let b = beforeSeq { q.append(URLQueryItem(name: "before_seq", value: "\(b)")) }
         let r: R = try await exec(req(url: url(segments: ["rooms", roomId, "messages"], query: q), method: "GET", roomToken: roomToken))
-        return r.messages
+        return MessagePage(messages: r.messages, hasMore: r.has_more)
     }
     public func sendMessage(roomToken: String, roomId: String, clientId: String, kind: String, body: [String: AnyCodable], replyTo: String? = nil, attachments: [String] = []) async throws -> MessageResponse {
         struct B: Encodable { var client_message_id: String; var kind: String; var body: [String: AnyCodable]; var reply_to: String?; var attachment_ids: [String] }
@@ -195,6 +195,16 @@ public final class OllacoreAPI {
     /// Documented: GET /v1/rooms/{id}/attachments/{attachmentId}/download → presigned URL.
     public func downloadAttachment(roomToken: String, roomId: String, attachmentId: String) async throws -> AttachmentDownloadResponse {
         try await exec(req(url: url(segments: ["rooms", roomId, "attachments", attachmentId, "download"]), method: "GET", roomToken: roomToken))
+    }
+    /// Documented: POST /v1/rooms/{id}/attachments/init → presigned PUT target.
+    public func initAttachment(roomToken: String, roomId: String, filename: String, mime: String, byteSize: Int) async throws -> AttachmentInitResponse {
+        struct B: Encodable { var filename: String; var mime: String; var byte_size: Int }
+        return try await exec(req(url: url(segments: ["rooms", roomId, "attachments", "init"]), method: "POST", roomToken: roomToken, body: try enc(B(filename: filename, mime: mime, byte_size: byteSize))))
+    }
+    /// Documented: POST /v1/rooms/{id}/attachments/{attachmentId}/complete → verify.
+    @discardableResult
+    public func completeAttachment(roomToken: String, roomId: String, attachmentId: String) async -> Bool {
+        await fire(req(url: url(segments: ["rooms", roomId, "attachments", attachmentId, "complete"]), method: "POST", roomToken: roomToken, body: Data()))
     }
     /// Documented: DELETE /v1/rooms/{room_id}/messages/{message_id} (soft delete).
     @discardableResult

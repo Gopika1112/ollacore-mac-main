@@ -103,6 +103,30 @@ final class ApiMockTests: XCTestCase {
         XCTAssertTrue(captured[0].url!.absoluteString.contains("/messages/m/reactions"))
     }
 
+    func testAttachmentInitCompleteShapes() async {
+        var captured: [URLRequest] = []
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            captured.append(req)
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = req.url!.absoluteString.contains("/init")
+                ? #"{"attachment_id":"a1","upload_url":"https://up.example/p","expires_at":"e"}"#
+                : "{}"
+            return (resp, Data(body.utf8))
+        }
+        let api = OllacoreAPI(session: URLSession(configuration: cfg))
+        let initR = try? await api.initAttachment(roomToken: "t", roomId: "r", filename: "p.png", mime: "image/png", byteSize: 10)
+        XCTAssertEqual(initR?.attachment_id, "a1")
+        XCTAssertTrue(captured[0].url!.absoluteString.contains("/attachments/init"))
+        XCTAssertEqual(captured[0].httpMethod, "POST")
+        let initBody = try? JSONSerialization.jsonObject(with: captured[0].httpBody ?? Data()) as? [String: Any]
+        XCTAssertEqual(initBody?["mime"] as? String, "image/png")
+        let ok = await api.completeAttachment(roomToken: "t", roomId: "r", attachmentId: "a1")
+        XCTAssertTrue(ok)
+        XCTAssertTrue(captured[1].url!.absoluteString.contains("/attachments/a1/complete"))
+    }
+
     func testDefaultTimeouts() {
         let s = OllacoreAPI.defaultSession()
         XCTAssertEqual(s.configuration.timeoutIntervalForRequest, 30)

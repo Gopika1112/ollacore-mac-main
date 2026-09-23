@@ -74,6 +74,33 @@ import XCTest
         vm.disconnect()
     }
 
+    func testHasMoreGatesLoadMore() async throws {
+        var calls = 0
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            calls += 1
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(#"{"messages":[{"id":"m1","room_id":"r","sender_id":"u","kind":"text","body":{"text":"x"},"created_at":"t","event_seq":1}],"has_more":false}"#.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        XCTAssertFalse(vm.hasMoreHistory)
+        let before = calls
+        await vm.loadMore()
+        XCTAssertEqual(calls, before) // no network when exhausted
+        vm.disconnect()
+    }
+
+    func testOversizeUploadRefused() async throws {
+        let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        vm.uploadAndSend(roomId: "r", data: Data(count: 101 * 1024 * 1024), filename: "big.bin", mime: "application/octet-stream", kind: "file")
+        if case .failed(let name, _) = vm.uploadState { XCTAssertEqual(name, "big.bin") }
+        else { XCTFail("expected failed state") }
+        vm.disconnect()
+    }
+
     func testLoadMorePrepends() async throws {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]

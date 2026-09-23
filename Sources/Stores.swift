@@ -181,11 +181,12 @@ public struct FailedDraft: Identifiable {
         failedDrafts.removeAll(); pendingFrames.removeAll(); sendingCount = 0
         selectedIds.removeAll(); selectionMode = false
         do {
-            let hist = try await api.listMessages(roomToken: roomToken, roomId: roomId)
+            let page = try await api.listMessages(roomToken: roomToken, roomId: roomId)
             guard gen == joinGen else { return } // superseded by a newer join: publish nothing
             historyError = nil // success clears any error left by an older join
-            messages = hist.sorted { $0.event_seq < $1.event_seq }
+            messages = page.messages.sorted { $0.event_seq < $1.event_seq }
             seenIds = Set(messages.map(\.id))
+            hasMoreHistory = page.hasMore
             enforceWindow()
             historyLoaded = true
         } catch {
@@ -256,7 +257,7 @@ public struct FailedDraft: Identifiable {
                     // Fell too far behind: refetch history, reset cursor.
                     // Generation-guarded: a room switch mid-fetch must not restore stale data.
                     let gen = self.joinGen
-                    let fresh = (try? await self.api.listMessages(roomToken: self.currentToken, roomId: self.currentRoom)) ?? []
+                    let fresh = (try? await self.api.listMessages(roomToken: self.currentToken, roomId: self.currentRoom))?.messages ?? []
                     guard gen == self.joinGen else { break }
                     self.messages = fresh.sorted { $0.event_seq < $1.event_seq }
                     self.seenIds = Set(fresh.map(\.id))
@@ -300,15 +301,20 @@ public struct FailedDraft: Identifiable {
         failedDrafts.removeAll { $0.id == clientId }
         return reqId
     }
+    @Published public var hasMoreHistory = false
+    @Published public var isLoadingMore = false
     /// Paging for long chats: prepends older messages (deduplicated), newest stay put.
     public func loadMore() async {
-        guard historyLoaded, !currentRoom.isEmpty, let oldest = messages.map(\.event_seq).min() else { return }
-        guard let older = try? await api.listMessages(roomToken: currentToken, roomId: currentRoom, beforeSeq: oldest) else { return }
-        for m in older where !seenIds.contains(m.id) && m.room_id == currentRoom {
+        guard historyLoaded, hasMoreHistory, !currentRoom.isEmpty, let oldest = messages.map(\.event_seq).min() else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        guard let page = try? await api.listMessages(roomToken: currentToken, roomId: currentRoom, beforeSeq: oldest) else { return }
+        for m in page.messages where !seenIds.contains(m.id) && m.room_id == currentRoom {
             seenIds.insert(m.id)
             messages.append(m)
         }
         messages.sort { $0.event_seq < $1.event_seq }
+        hasMoreHistory = page.hasMore
         enforceWindow()
     }
     public func retryDraft(roomId: String, draft: FailedDraft) {
@@ -367,6 +373,76 @@ public struct FailedDraft: Identifiable {
     }
     public func receiptColor(for messageId: String) -> Color {
         receipts[messageId] == .read ? .blue : .secondary
+    }
+    public enum UploadState: Equatable {
+        case idle, uploading(filename: String), failed(filename: String, message: String)
+    }
+    @Published public var uploadState: UploadState = .idle
+    private var uploadTask: URLSessionUploadTask?
+    private var pendingUpload: (data: Data, filename: String, mime: String, kind: String, caption: String?)?
+    /// init → PUT presigned → complete → send. Documented endpoints only; single-PUT
+    /// (large multipart uploads remain future work and are refused client-side above 100MB).
+    public func uploadAndSend(roomId: String, data: Data, filename: String, mime: String, kind: String, caption: String? = nil) {
+        guard data.count <= 100 * 1024 * 1024 else {
+            uploadState = .failed(filename: filename, message: "File exceeds the 100MB single-upload limit.")
+            return
+        }
+        pendingUpload = (data, filename, mime, kind, caption)
+        uploadState = .uploading(filename: filename)
+        Task { await self.runUpload(roomId: roomId) }
+    }
+    public func cancelUpload() { uploadTask?.cancel(); uploadTask = nil; uploadState = .idle }
+    public func retryUpload(roomId: String) {
+        guard case .failed = uploadState, pendingUpload != nil else { return }
+        uploadState = .uploading(filename: pendingUpload!.filename)
+        Task { await self.runUpload(roomId: roomId) }
+    }
+    private func runUpload(roomId: String) async {
+        guard let p = pendingUpload else { uploadState = .idle; return }
+        do {
+            let initR = try await api.initAttachment(roomToken: currentToken, roomId: roomId, filename: p.filename, mime: p.mime, byteSize: p.data.count)
+            guard let putURL = URL(string: initR.upload_url), putURL.scheme?.lowercased() == "https" else {
+                throw ApiException(message: "Invalid upload URL.", code: "bad_upload_url", httpStatus: nil)
+            }
+            var req = URLRequest(url: putURL)
+            req.httpMethod = "PUT"
+            req.setValue(p.mime, forHTTPHeaderField: "Content-Type")
+            // Bridge to a retained task so cancelUpload() actually aborts the PUT.
+            let resp: URLResponse = try await withCheckedThrowingContinuation { cont in
+                let t = URLSession.shared.uploadTask(with: req, from: p.data) { _, r, e in
+                    if let e { cont.resume(throwing: e) }
+                    else if let r { cont.resume(returning: r) }
+                    else { cont.resume(throwing: ApiException(message: "Upload failed.", code: "upload_failed", httpStatus: nil)) }
+                }
+                self.uploadTask = t
+                t.resume()
+            }
+            self.uploadTask = nil
+            try Task.checkCancellation()
+            guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else {
+                throw ApiException(message: "Upload failed.", code: "upload_failed", httpStatus: (resp as? HTTPURLResponse)?.statusCode)
+            }
+            guard await api.completeAttachment(roomToken: currentToken, roomId: roomId, attachmentId: initR.attachment_id) else {
+                throw ApiException(message: "Attachment verification failed.", code: "complete_failed", httpStatus: nil)
+            }
+            var body: [String: AnyCodable] = ["mime": AnyCodable(p.mime), "filename": AnyCodable(p.filename)]
+            if let c = p.caption { body["text"] = AnyCodable(c) }
+            _ = try await api.sendMessage(roomToken: currentToken, roomId: roomId, clientId: UUID().uuidString, kind: kindForMime(p.mime, requested: p.kind), body: body, attachmentIds: [initR.attachment_id])
+            pendingUpload = nil
+            uploadState = .idle
+        } catch is CancellationError {
+            uploadState = .idle
+        } catch let e as URLError where e.code == .cancelled {
+            uploadState = .idle // user-cancelled PUT: quiet, retryable via pendingUpload
+        } catch {
+            uploadState = .failed(filename: p.filename, message: error.localizedDescription)
+        }
+    }
+    private func kindForMime(_ mime: String, requested: String) -> String {
+        if mime.hasPrefix("image/") { return MessageKinds.image }
+        if mime.hasPrefix("video/") { return MessageKinds.video }
+        if mime.hasPrefix("audio/") { return MessageKinds.audio }
+        return requested.isEmpty ? MessageKinds.file : requested
     }
     public func resolveAttachmentURL(attachmentId: String) async -> URL? {
         if let u = attachmentURLs[attachmentId] { return u }

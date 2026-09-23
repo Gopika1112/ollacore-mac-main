@@ -198,10 +198,14 @@ struct ChatDetailView: View {
                 }.padding()
             }
             ScrollView { LazyVStack(alignment: .leading, spacing: 8) {
-                if chat.historyLoaded && !chat.messages.isEmpty {
-                    Button("Load earlier messages") { Task { await chat.loadMore() } }
-                        .font(.caption).buttonStyle(.link)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                if chat.historyLoaded && chat.hasMoreHistory && !chat.messages.isEmpty {
+                    if chat.isLoadingMore {
+                        ProgressView().frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        Button("Load earlier messages") { Task { await chat.loadMore() } }
+                            .font(.caption).buttonStyle(.link)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
                 ForEach(chat.messages) { m in
                     MessageBubble(message: m, roomId: room.room_id, chat: chat,
@@ -231,7 +235,28 @@ struct ChatDetailView: View {
             if chat.sendingCount > 0 {
                 Text("Sending…").font(.caption2).foregroundColor(.secondary).padding(.horizontal)
             }
+            switch chat.uploadState {
+            case .uploading(let name):
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Uploading \(name)…").font(.caption)
+                    Spacer()
+                    Button("Cancel") { chat.cancelUpload() }
+                }.padding(8).background(Color.secondary.opacity(0.12))
+            case .failed(let name, let message):
+                HStack {
+                    Image(systemName: "exclamationmark.triangle").foregroundColor(.red)
+                    Text("\(name): \(message)").font(.caption).lineLimit(2)
+                    Spacer()
+                    Button("Retry") { chat.retryUpload(roomId: room.room_id) }
+                    Button("Dismiss") { chat.cancelUpload() }
+                }.padding(8).background(Color.red.opacity(0.1))
+            case .idle:
+                EmptyView()
+            }
             HStack {
+                Button { pickAndSend() } label: { Image(systemName: "paperclip") }
+                    .help("Attach a file")
                 TextField("Message", text: $draft)
                     .textFieldStyle(.plain)
                     .padding(8)
@@ -282,6 +307,28 @@ struct ChatDetailView: View {
             }.padding().frame(width: 340)
         }
     }
+
+    private func pickAndSend() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let data = try? Data(contentsOf: url) else { return }
+        let ext = url.pathExtension.lowercased()
+        let mime: String
+        let kind: String
+        switch ext {
+        case "png": mime = "image/png"; kind = MessageKinds.image
+        case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
+        case "gif": mime = "image/gif"; kind = MessageKinds.image
+        case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
+        case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
+        case "pdf": mime = "application/pdf"; kind = MessageKinds.file
+        default: mime = "application/octet-stream"; kind = MessageKinds.file
+        }
+        chat.uploadAndSend(roomId: room.room_id, data: data, filename: url.lastPathComponent, mime: mime, kind: kind)
+    }
 }
 
 struct MessageBubble: View {
@@ -291,10 +338,34 @@ struct MessageBubble: View {
     var onReply: () -> Void = {}
     var onForward: () -> Void = {}
     @State private var imageURL: URL?
+    @State private var showFullImage = false
+    @State private var opening = false
 
     private var caption: String? { message.body["text"]?.value as? String }
     private var filename: String? { message.body["filename"]?.value as? String }
     private var mime: String? { message.body["mime"]?.value as? String }
+
+    /// Downloads via the presigned URL and opens with the default app (or Save panel).
+    private func openAttachment(savePanel: Bool = false) {
+        guard !opening, let aid = message.attachment_ids.first else { return }
+        opening = true
+        Task {
+            defer { opening = false }
+            guard let url = await chat.resolveAttachmentURL(attachmentId: aid),
+                  let (data, _) = try? await URLSession.shared.data(from: url) else { return }
+            let dest: URL
+            if savePanel {
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = filename ?? aid
+                guard panel.runModal() == .OK, let chosen = panel.url else { return }
+                dest = chosen
+            } else {
+                dest = FileManager.default.temporaryDirectory.appendingPathComponent(filename ?? aid)
+            }
+            try? data.write(to: dest)
+            NSWorkspace.shared.open(dest)
+        }
+    }
 
     var body: some View {
         Group {
@@ -331,18 +402,37 @@ struct MessageBubble: View {
                         default: ProgressView().frame(width: 200, height: 120)
                         }
                     }
+                    .onTapGesture { showFullImage = true }
+                    .sheet(isPresented: $showFullImage) {
+                        VStack {
+                            AsyncImage(url: u) { phase in
+                                switch phase {
+                                case .success(let img): img.resizable().scaledToFit()
+                                case .failure: Label("Image unavailable", systemImage: "photo")
+                                default: ProgressView()
+                                }
+                            }.frame(maxWidth: 800, maxHeight: 600)
+                            Button("Close") { showFullImage = false }.padding()
+                        }.padding()
+                    }
                 } else {
                     Label("Image", systemImage: "photo").foregroundColor(.secondary)
                         .task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "") }
                 }
                 if let c = caption { Text(c) }
             case MessageKinds.video:
-                Label(filename ?? "Video", systemImage: "video.fill").foregroundColor(.secondary)
+                Button { openAttachment() } label: {
+                    Label(filename ?? "Video (tap to open)", systemImage: "video.fill").foregroundColor(.secondary)
+                }.buttonStyle(.plain).disabled(opening)
                 if let c = caption { Text(c).font(.caption) }
             case MessageKinds.audio:
-                Label("Voice message", systemImage: "waveform").foregroundColor(.secondary)
+                Button { openAttachment() } label: {
+                    Label(opening ? "Loading…" : "Voice message (tap to play)", systemImage: "waveform").foregroundColor(.secondary)
+                }.buttonStyle(.plain).disabled(opening)
             case MessageKinds.file:
-                Label(filename ?? "Document", systemImage: "doc.fill").foregroundColor(.secondary)
+                Button { openAttachment() } label: {
+                    Label(filename ?? "Document (tap to open)", systemImage: "doc.fill").foregroundColor(.secondary)
+                }.buttonStyle(.plain).disabled(opening)
                 if let m = mime { Text(m).font(.caption).foregroundColor(.secondary) }
             case MessageKinds.location:
                 let lat = message.body["lat"]?.value
@@ -372,6 +462,7 @@ struct MessageBubble: View {
         }
         .contextMenu {
             Button("Reply") { onReply() }
+            Button("Save attachment…") { openAttachment(savePanel: true) }
             Button("Copy") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(message.body["text"]?.value as? String ?? "", forType: .string)
