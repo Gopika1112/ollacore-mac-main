@@ -152,7 +152,13 @@ struct ChatDetailView: View {
                 }
             }.padding() }
             HStack {
-                TextField("Message", text: $draft).textFieldStyle(.roundedBorder)
+                TextField("Message", text: $draft)
+                    .textFieldStyle(.plain)
+                    .padding(8)
+                    .foregroundColor(.primary)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
                 Button("Send") {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return }
