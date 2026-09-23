@@ -55,9 +55,11 @@ import SwiftUI
     public func requestOtp() async {
         guard canResend() else { error = "Wait \(resendRemaining())s before resending the code."; return }
         isLoading = true; defer { isLoading = false }
-        lastOtpRequestAt = Date()
-        do { _ = try await api.requestOtp(phone: phone); step = .otp }
-        catch { self.error = error.localizedDescription }
+        do {
+            _ = try await api.requestOtp(phone: phone)
+            lastOtpRequestAt = Date() // cooldown starts only on success; failures stay retryable
+            step = .otp
+        } catch { self.error = error.localizedDescription }
     }
     public func verifyOtp() async {
         isLoading = true; defer { isLoading = false }
@@ -79,10 +81,17 @@ import SwiftUI
 // MARK: - Home / Chat ViewModels (mirror HomeViewModel + ChatViewModel + ChatRepository)
 @MainActor public final class HomeViewModel: ObservableObject {
     @Published public var inbox: [InboxItem] = []; @Published public var isLoading = false
+    @Published public var error: String?
     private let api = OllacoreAPI.shared
     public func refresh(token: String) async {
         isLoading = true; defer { isLoading = false }
-        inbox = (try? await api.getInbox(token: token)) ?? []
+        do {
+            inbox = try await api.getInbox(token: token)
+            error = nil
+        } catch {
+            // Preserve last good data: failure surfaces as an error, never as an empty inbox.
+            self.error = error.localizedDescription
+        }
     }
 }
 public enum ReceiptState { case sent, delivered, read }

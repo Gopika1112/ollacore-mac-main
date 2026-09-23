@@ -80,6 +80,12 @@ struct HomeView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedRoom) {
+                if let e = home.error {
+                    Section {
+                        Text(e).font(.caption).foregroundColor(.red)
+                        Button("Retry") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }
+                    } header: { Text("Could not refresh") }
+                }
                 Section("Conversations") {
                     ForEach(filtered, id: \.room_id) { item in
                         VStack(alignment: .leading) {
