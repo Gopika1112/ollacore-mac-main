@@ -366,12 +366,34 @@ public struct FailedDraft: Identifiable {
 // MARK: - CallLogStore (mirrors Android CallLogStore — client-only JSON)
 public struct CallEntry: Codable, Identifiable { public var id: String; public var roomId: String; public var peerName: String; public var audioOnly: Bool; public var date: Date }
 @MainActor public final class CallLogStore: ObservableObject {
+    static let storeVersion = 1
+    private static let key = "call_log_v1"
+    private static let versionKey = "call_log_version"
+    private static let corruptKey = "call_log_corrupt_backup"
     @Published public var entries: [CallEntry] = []
     public init() {
-        if let d = UserDefaults.standard.data(forKey: "call_log"),
-           let e = try? JSONDecoder().decode([CallEntry].self, from: d) { entries = e }
+        let v = UserDefaults.standard.integer(forKey: Self.versionKey)
+        if v == 0, let legacy = UserDefaults.standard.data(forKey: "call_log") {
+            // Migrate the original unversioned store once, then stamp the version.
+            if let e = try? JSONDecoder().decode([CallEntry].self, from: legacy) { entries = e }
+            UserDefaults.standard.removeObject(forKey: "call_log")
+            UserDefaults.standard.set(Self.storeVersion, forKey: Self.versionKey)
+            persist()
+            return
+        }
+        guard let d = UserDefaults.standard.data(forKey: Self.key) else { return }
+        if let e = try? JSONDecoder().decode([CallEntry].self, from: d) {
+            entries = e
+        } else {
+            // Corrupt data is quarantined (not deleted) and the log restarts empty.
+            UserDefaults.standard.set(d, forKey: Self.corruptKey)
+            UserDefaults.standard.removeObject(forKey: Self.key)
+        }
     }
     public func add(_ e: CallEntry) { entries.insert(e, at: 0); persist() }
     public func clear() { entries = []; persist() }
-    private func persist() { UserDefaults.standard.set(try? JSONEncoder().encode(entries), forKey: "call_log") }
+    private func persist() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(entries), forKey: Self.key)
+        UserDefaults.standard.set(Self.storeVersion, forKey: Self.versionKey)
+    }
 }

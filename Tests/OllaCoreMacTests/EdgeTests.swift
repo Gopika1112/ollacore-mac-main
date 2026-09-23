@@ -43,6 +43,16 @@ import XCTest
         XCTAssertTrue(store.entries.isEmpty)
     }
 
+    func testCorruptCallLogQuarantined() {
+        UserDefaults.standard.set(Data("garbage".utf8), forKey: "call_log_v1")
+        UserDefaults.standard.set(1, forKey: "call_log_version")
+        let store = CallLogStore()
+        XCTAssertTrue(store.entries.isEmpty)
+        XCTAssertNotNil(UserDefaults.standard.data(forKey: "call_log_corrupt_backup"))
+        XCTAssertNil(UserDefaults.standard.data(forKey: "call_log_v1"))
+        UserDefaults.standard.removeObject(forKey: "call_log_corrupt_backup")
+    }
+
     func testDeviceIdStable() {
         let s = SessionStore()
         XCTAssertEqual(s.deviceId, s.deviceId)
