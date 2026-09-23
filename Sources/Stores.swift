@@ -158,6 +158,7 @@ public struct FailedDraft: Identifiable {
         // Defensive: never stack sockets if join is called twice for any reason.
         socket.disconnect()
         socket.onEvent = nil
+        socket.onSendFailure = nil
         currentRoom = roomId; currentToken = roomToken
         connectionError = nil; accessRevoked = false
         historyError = nil; historyLoaded = false
@@ -172,6 +173,9 @@ public struct FailedDraft: Identifiable {
             return
         }
         RoomTokenCache.shared.set(roomId: roomId, token: roomToken, wsURL: wsUrl, rtcURL: "", expiresAt: expiresAt)
+        socket.onSendFailure = { [weak self] reqId in
+            Task { @MainActor in self?.failPending(requestId: reqId) }
+        }
         socket.onEvent = { [weak self] e in
             Task { @MainActor in
                 guard let self else { return }
@@ -197,12 +201,7 @@ public struct FailedDraft: Identifiable {
                     self.sendingCount = self.pendingFrames.count
                 case .error(let code, let msg, let reqId):
                     if code == "rate_limited" { self.rateLimitedNotice = msg }
-                    if let reqId, let p = self.pendingFrames.removeValue(forKey: reqId) {
-                        self.sendingCount = self.pendingFrames.count
-                        if !self.failedDrafts.contains(where: { $0.id == p.clientId }) {
-                            self.failedDrafts.append(FailedDraft(id: p.clientId, text: p.text))
-                        }
-                    }
+                    if let reqId { self.failPending(requestId: reqId) }
                 case .receiptDelivered(_, let id): self.receipts[id] = .delivered
                 case .receiptRead(_, let id): self.receipts[id] = .read
                 case .reactionAdded(_, let id, let emoji):
@@ -235,6 +234,13 @@ public struct FailedDraft: Identifiable {
         pendingFrames = pendingFrames.filter { $0.value.clientId != clientId }
         sendingCount = pendingFrames.count
         failedDrafts.removeAll { $0.id == clientId }
+    }
+    private func failPending(requestId: String) {
+        guard let p = pendingFrames.removeValue(forKey: requestId) else { return }
+        sendingCount = pendingFrames.count
+        if !failedDrafts.contains(where: { $0.id == p.clientId }) {
+            failedDrafts.append(FailedDraft(id: p.clientId, text: p.text))
+        }
     }
     @discardableResult
     public func send(roomId: String, text: String) -> String {

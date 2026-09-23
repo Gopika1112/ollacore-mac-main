@@ -109,13 +109,21 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         default: break
         }
     }
+    /// Called with the frame request_id when the transport itself rejects the send.
+    public var onSendFailure: ((String) -> Void)?
     @discardableResult
     public func send(type: String, roomId: String? = nil, payload: [String: Any] = [:]) -> String {
         let reqId = UUID().uuidString
         var frame: [String: Any] = ["v": 1, "request_id": reqId, "type": type, "payload": payload]
         if let roomId { frame["room_id"] = roomId } // omit when nil — never send null
-        if let d = try? JSONSerialization.data(withJSONObject: frame), let s = String(data: d, encoding: .utf8) {
-            task?.send(.string(s)) { _ in }
+        guard let d = try? JSONSerialization.data(withJSONObject: frame),
+              let s = String(data: d, encoding: .utf8) else {
+            onSendFailure?(reqId)
+            return reqId
+        }
+        // No task (not connected): leave pending; ack/error correlation settles it after connect.
+        task?.send(.string(s)) { [weak self] err in
+            if err != nil { self?.onSendFailure?(reqId) }
         }
         return reqId
     }

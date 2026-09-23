@@ -19,7 +19,14 @@ public final class OllacoreAPI {
     public var apiBase = AppConfig.apiBase
     public var appId: String { AppConfig.appId }
     private let session: URLSession
-    public init(session: URLSession = .shared) { self.session = session }
+    /// Explicit timeouts (30s request, 60s resource) instead of invisible system defaults.
+    public static func defaultSession() -> URLSession {
+        let c = URLSessionConfiguration.default
+        c.timeoutIntervalForRequest = 30
+        c.timeoutIntervalForResource = 60
+        return URLSession(configuration: c)
+    }
+    public init(session: URLSession? = nil) { self.session = session ?? Self.defaultSession() }
     private let json = JSONEncoder()
 
     /// Segment encoder: "/" is NOT allowed inside a dynamic value (room/message ids).

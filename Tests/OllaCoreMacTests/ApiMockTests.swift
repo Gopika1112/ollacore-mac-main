@@ -66,6 +66,49 @@ final class ApiMockTests: XCTestCase {
         XCTAssertTrue(s.contains("q=a%26b%2Bc") || s.contains("q=a%26b+c"), s)
     }
 
+    func testAuthHeadersPerPlane() async {
+        var captured: [URLRequest] = []
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            captured.append(req)
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = req.url!.absoluteString.contains("/search")
+                ? #"{"messages":[],"has_more":false}"#
+                : #"{"conversations":[]}"#
+            return (resp, Data(body.utf8))
+        }
+        let api = OllacoreAPI(session: URLSession(configuration: cfg))
+        _ = try? await api.getInbox(token: "sess-abc")
+        _ = try? await api.searchMessages(roomToken: "room-xyz", roomId: "r", q: "hi")
+        XCTAssertEqual(captured[0].value(forHTTPHeaderField: "Authorization"), "Bearer sess-abc")
+        XCTAssertEqual(captured[1].value(forHTTPHeaderField: "Authorization"), "Bearer room-xyz")
+        XCTAssertEqual(captured[0].httpMethod, "GET")
+    }
+
+    func testSendAndReactionBodies() async {
+        var captured: [URLRequest] = []
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            captured.append(req)
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data("{}".utf8))
+        }
+        let api = OllacoreAPI(session: URLSession(configuration: cfg))
+        _ = await api.addReaction(roomToken: "t", roomId: "r", messageId: "m", emoji: "👍")
+        XCTAssertEqual(captured[0].httpMethod, "POST")
+        let body = try? JSONSerialization.jsonObject(with: captured[0].httpBody ?? Data()) as? [String: Any]
+        XCTAssertEqual(body?["emoji"] as? String, "👍")
+        XCTAssertTrue(captured[0].url!.absoluteString.contains("/messages/m/reactions"))
+    }
+
+    func testDefaultTimeouts() {
+        let s = OllacoreAPI.defaultSession()
+        XCTAssertEqual(s.configuration.timeoutIntervalForRequest, 30)
+        XCTAssertEqual(s.configuration.timeoutIntervalForResource, 60)
+    }
+
     func testRoomTokenURLUsesQueryItem() async {
         var captured: URL?
         let cfg = URLSessionConfiguration.ephemeral
