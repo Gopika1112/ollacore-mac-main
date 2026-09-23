@@ -106,8 +106,13 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public func ping() { send(type: "ping") }
     /// Idempotent send: reuse `clientId` on retry so the server dedupes (never mint a fresh id per retry).
     @discardableResult
-    public func sendMessage(roomId: String, text: String, clientId: String = UUID().uuidString) -> String {
-        send(type: "message.send", roomId: roomId, payload: ["client_message_id": clientId, "kind": "text", "body": ["text": text], "attachment_ids": []])
+    public func sendMessage(roomId: String, text: String, clientId: String = UUID().uuidString, replyTo: String? = nil) -> String {
+        var payload: [String: Any] = ["client_message_id": clientId, "kind": "text", "body": ["text": text], "attachment_ids": []]
+        if let replyTo { payload["reply_to"] = replyTo }
+        return send(type: "message.send", roomId: roomId, payload: payload)
+    }
+    public func deleteMessage(roomId: String, messageId: String) {
+        send(type: "message.delete", roomId: roomId, payload: ["message_id": messageId])
     }
     public func addReaction(roomId: String, messageId: String, emoji: String) {
         send(type: "reaction.add", roomId: roomId, payload: ["message_id": messageId, "emoji": emoji])

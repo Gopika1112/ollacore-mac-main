@@ -147,6 +147,11 @@ public final class OllacoreAPI {
     public func downloadAttachment(roomToken: String, roomId: String, attachmentId: String) async throws -> AttachmentDownloadResponse {
         try await exec(req(url: url(path: "rooms/\(roomId)/attachments/\(attachmentId)/download"), method: "GET", roomToken: roomToken))
     }
+    /// Documented: DELETE /v1/rooms/{room_id}/messages/{message_id} (soft delete).
+    @discardableResult
+    public func deleteMessage(roomToken: String, roomId: String, messageId: String) async -> Bool {
+        await fire(req(url: url(path: "rooms/\(roomId)/messages/\(messageId)"), method: "DELETE", roomToken: roomToken))
+    }
     /// Documented endpoint: GET /v1/rooms/{room_id}/messages/search?q=&limit= (Client API).
     public func searchMessages(roomToken: String, roomId: String, q: String, limit: Int = 20) async throws -> [MessageResponse] {
         struct R: Decodable { var messages: [MessageResponse]; var has_more: Bool }

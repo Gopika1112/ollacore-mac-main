@@ -87,6 +87,12 @@ import SwiftUI
 }
 public enum ReceiptState { case sent, delivered, read }
 
+public struct FailedDraft: Identifiable {
+    public var id: String // client_message_id, reused on retry for idempotency
+    public var text: String
+    public init(id: String, text: String) { self.id = id; self.text = text }
+}
+
 @MainActor public final class ChatViewModel: ObservableObject {
     @Published public var messages: [MessageResponse] = []
     @Published public var rateLimitedNotice: String?
@@ -94,6 +100,13 @@ public enum ReceiptState { case sent, delivered, read }
     @Published public var reactions: [String: [String: Int]] = [:]
     @Published public var activeCall: (callId: String, initiator: String)?
     @Published public var attachmentURLs: [String: URL] = [:]
+    @Published public private(set) var failedDrafts: [FailedDraft] = []
+    @Published public private(set) var sendingCount = 0
+    @Published public var replyTo: MessageResponse?
+    @Published public private(set) var deletedIds: Set<String> = []
+    @Published public var selectionMode = false
+    @Published public private(set) var selectedIds: Set<String> = []
+    private var pendingFrames: [String: (clientId: String, text: String)] = [:] // frame request_id → send
     public var socket = ChatWebSocket()
     private let api: OllacoreAPI
     public init(api: OllacoreAPI = .shared) { self.api = api }
@@ -116,12 +129,28 @@ public enum ReceiptState { case sent, delivered, read }
                     self.seenIds.insert(m.id)
                     self.messages.append(m)
                     self.messages.sort { $0.event_seq < $1.event_seq } // ordering by seq
+                    if m.sender_id == self.ownId {
+                        if self.receipts[m.id] == nil { self.receipts[m.id] = .sent }
+                        // A send we tracked succeeded: clear pending + any failed draft.
+                        if let cid = m.client_message_id { self.clearPending(clientId: cid) }
+                    }
                 case .messageUpdated(let m):
                     if let i = self.messages.firstIndex(where: { $0.id == m.id }) { self.messages[i] = m }
                 case .messageDeleted(_, let id):
-                    self.messages.removeAll { $0.id == id }
-                    self.receipts.removeValue(forKey: id)
+                    // Tombstone: keep the row so history doesn't look corrupted.
+                    self.deletedIds.insert(id)
                     self.reactions.removeValue(forKey: id)
+                case .ack(let reqId):
+                    self.pendingFrames.removeValue(forKey: reqId)
+                    self.sendingCount = self.pendingFrames.count
+                case .error(let code, let msg, let reqId):
+                    if code == "rate_limited" { self.rateLimitedNotice = msg }
+                    if let reqId, let p = self.pendingFrames.removeValue(forKey: reqId) {
+                        self.sendingCount = self.pendingFrames.count
+                        if !self.failedDrafts.contains(where: { $0.id == p.clientId }) {
+                            self.failedDrafts.append(FailedDraft(id: p.clientId, text: p.text))
+                        }
+                    }
                 case .receiptDelivered(_, let id): self.receipts[id] = .delivered
                 case .receiptRead(_, let id): self.receipts[id] = .read
                 case .reactionAdded(_, let id, let emoji):
@@ -148,9 +177,56 @@ public enum ReceiptState { case sent, delivered, read }
         }
         socket.connect(url: wsUrl, token: roomToken)
     }
-    public func send(roomId: String, text: String) { socket.sendMessage(roomId: roomId, text: text) }
+    private func clearPending(clientId: String) {
+        pendingFrames = pendingFrames.filter { $0.value.clientId != clientId }
+        sendingCount = pendingFrames.count
+        failedDrafts.removeAll { $0.id == clientId }
+    }
+    @discardableResult
+    public func send(roomId: String, text: String) -> String {
+        let clientId = UUID().uuidString
+        let reqId = socket.sendMessage(roomId: roomId, text: text, clientId: clientId, replyTo: replyTo?.id)
+        pendingFrames[reqId] = (clientId, text)
+        sendingCount = pendingFrames.count
+        replyTo = nil
+        return reqId
+    }
     /// Retry reuses the same client_message_id for idempotency.
-    public func retry(roomId: String, text: String, clientId: String) { socket.sendMessage(roomId: roomId, text: text, clientId: clientId) }
+    @discardableResult
+    public func retry(roomId: String, text: String, clientId: String) -> String {
+        let reqId = socket.sendMessage(roomId: roomId, text: text, clientId: clientId)
+        pendingFrames[reqId] = (clientId, text)
+        sendingCount = pendingFrames.count
+        failedDrafts.removeAll { $0.id == clientId }
+        return reqId
+    }
+    public func retryDraft(roomId: String, draft: FailedDraft) {
+        let reqId = socket.sendMessage(roomId: roomId, text: draft.text, clientId: draft.id)
+        pendingFrames[reqId] = (draft.id, draft.text)
+        sendingCount = pendingFrames.count
+        failedDrafts.removeAll { $0.id == draft.id }
+    }
+    public func deleteMessage(roomId: String, messageId: String) {
+        socket.deleteMessage(roomId: roomId, messageId: messageId)
+        Task { _ = await api.deleteMessage(roomToken: currentToken, roomId: roomId, messageId: messageId) }
+        deletedIds.insert(messageId) // optimistic tombstone; server echo confirms
+    }
+    public func forwardMessage(_ msg: MessageResponse, toRoomId: String, sessionToken: String, deviceId: String) async -> Bool {
+        // Fresh id: a forward is a new message (unlike retry, which must reuse the id).
+        guard let rt = try? await api.roomToken(token: sessionToken, roomId: toRoomId, deviceId: deviceId) else { return false }
+        let body = msg.body
+        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachmentIds: msg.attachment_ids)) != nil
+    }
+    // MARK: Selection
+    public func toggleSelect(id: String) {
+        if selectedIds.contains(id) { selectedIds.remove(id) } else { selectedIds.insert(id) }
+        if selectedIds.isEmpty { selectionMode = false }
+    }
+    public func clearSelection() { selectedIds.removeAll(); selectionMode = false }
+    public func deleteSelected(roomId: String) {
+        for id in selectedIds { deleteMessage(roomId: roomId, messageId: id) }
+        clearSelection()
+    }
     public func disconnect() { socket.disconnect() }
     public func addReaction(roomId: String, messageId: String, emoji: String) {
         socket.addReaction(roomId: roomId, messageId: messageId, emoji: emoji)

@@ -24,6 +24,51 @@ import XCTest
         vm.disconnect()
     }
 
+    func testSendAckErrorRetryFlow() async throws {
+        let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        let rid = vm.send(roomId: "r", text: "hello")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.sendingCount, 1)
+        vm.socket.onEvent?(.ack(rid))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.sendingCount, 0)
+        let rid2 = vm.send(roomId: "r", text: "again")
+        for _ in 0..<20 { await Task.yield() }
+        vm.socket.onEvent?(.error(code: "send_failed", message: "x", requestId: rid2))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.failedDrafts.count, 1)
+        // Server echo with same client id clears pending + failed.
+        let cid = vm.failedDrafts.first!.id
+        let d = Data(#"{"id":"m9","room_id":"r","sender_id":"u","kind":"text","body":{"text":"again"},"created_at":"t","event_seq":9,"client_message_id":"\#(cid)"}"#.utf8)
+        let m = try JSONDecoder().decode(MessageResponse.self, from: d)
+        vm.socket.onEvent?(.messageCreated(m))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(vm.failedDrafts.isEmpty)
+        XCTAssertEqual(vm.receiptLabel(for: "m9"), "✓")
+        vm.disconnect()
+    }
+
+    func testReplyTombstoneSelection() async throws {
+        let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        let m = try msg("m1", seq: 1)
+        vm.socket.onEvent?(.messageCreated(m))
+        for _ in 0..<20 { await Task.yield() }
+        vm.replyTo = m
+        _ = vm.send(roomId: "r", text: "reply")
+        XCTAssertNil(vm.replyTo) // consumed on send
+        vm.socket.onEvent?(.messageDeleted(roomId: "r", messageId: "m1"))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(vm.deletedIds.contains("m1"))
+        XCTAssertTrue(vm.messages.contains(where: { $0.id == "m1" })) // tombstone keeps the row
+        vm.toggleSelect(id: "m1")
+        XCTAssertTrue(vm.selectionMode)
+        vm.toggleSelect(id: "m1")
+        XCTAssertFalse(vm.selectionMode)
+        vm.disconnect()
+    }
+
     func testDuplicateSuppressedAndReceiptsReactionsCalls() async throws {
         let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
         await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")

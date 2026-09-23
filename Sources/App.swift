@@ -112,7 +112,7 @@ struct HomeView: View {
             }
         } detail: {
             if let room = selectedRoom, let token = auth.session.sessionToken {
-                ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId)
+                ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId, rooms: home.inbox)
             } else {
                 Text("Select a conversation").foregroundColor(.secondary)
             }
@@ -127,12 +127,15 @@ extension InboxItem: Hashable { public static func == (l: InboxItem, r: InboxIte
 
 struct ChatDetailView: View {
     var room: InboxItem; var sessionToken: String; var deviceId: String; var ownId: String?
+    var rooms: [InboxItem] = []
     @StateObject private var chat = ChatViewModel()
     @State private var draft = ""
     @State private var roomToken = ""
     @State private var wsUrl = ""
-    init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil) {
-        self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId
+    @State private var forwarding: MessageResponse?
+    @State private var forwardDone: String?
+    init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = []) {
+        self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -146,11 +149,43 @@ struct ChatDetailView: View {
                 .padding(8).background(Color.green.opacity(0.12))
                 .accessibilityIdentifier("call_banner_\(call.callId)")
             }
+            if chat.selectionMode {
+                HStack {
+                    Text("\(chat.selectedIds.count) selected").font(.callout)
+                    Spacer()
+                    Button("Delete") { chat.deleteSelected(roomId: room.room_id) }
+                    Button("Clear") { chat.clearSelection() }
+                }.padding(8).background(Color.secondary.opacity(0.12))
+            }
             ScrollView { LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(chat.messages) { m in
-                    MessageBubble(message: m, roomId: room.room_id, chat: chat)
+                    MessageBubble(message: m, roomId: room.room_id, chat: chat,
+                                  onReply: { chat.replyTo = m },
+                                  onForward: { forwarding = m })
+                }
+                if !chat.failedDrafts.isEmpty {
+                    Section {
+                        ForEach(chat.failedDrafts) { d in
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle").foregroundColor(.red)
+                                Text(d.text).lineLimit(2)
+                                Spacer()
+                                Button("Retry") { chat.retryDraft(roomId: room.room_id, draft: d) }
+                            }.padding(8).background(Color.red.opacity(0.1)).cornerRadius(8)
+                        }
+                    } header: { Text("Not sent").font(.caption).foregroundColor(.red) }
                 }
             }.padding() }
+            if let reply = chat.replyTo {
+                HStack {
+                    Text("↩ \(reply.body["text"]?.value as? String ?? "[\(reply.kind)]")").font(.caption).lineLimit(1)
+                    Spacer()
+                    Button("Cancel") { chat.replyTo = nil }
+                }.padding(8).background(Color.secondary.opacity(0.12))
+            }
+            if chat.sendingCount > 0 {
+                Text("Sending…").font(.caption2).foregroundColor(.secondary).padding(.horizontal)
+            }
             HStack {
                 TextField("Message", text: $draft)
                     .textFieldStyle(.plain)
@@ -175,6 +210,23 @@ struct ChatDetailView: View {
             }
         }
         .onDisappear { chat.disconnect() }
+        .sheet(item: $forwarding) { msg in
+            VStack(spacing: 12) {
+                Text("Forward message").font(.headline)
+                Text(msg.body["text"]?.value as? String ?? "[\(msg.kind)]").font(.caption).lineLimit(3)
+                List(rooms.filter { $0.room_id != room.room_id }, id: \.room_id) { r in
+                    Button(r.name ?? r.room_id) {
+                        Task {
+                            forwardDone = await chat.forwardMessage(msg, toRoomId: r.room_id, sessionToken: sessionToken, deviceId: deviceId)
+                                ? "Forwarded to \(r.name ?? r.room_id)" : "Forward failed"
+                        }
+                        forwarding = nil
+                    }
+                }.frame(minHeight: 200)
+                if let done = forwardDone { Text(done).font(.caption).foregroundColor(.secondary) }
+                Button("Cancel") { forwarding = nil }
+            }.padding().frame(width: 340)
+        }
     }
 }
 
@@ -182,6 +234,8 @@ struct MessageBubble: View {
     var message: MessageResponse
     var roomId: String
     @ObservedObject var chat: ChatViewModel
+    var onReply: () -> Void = {}
+    var onForward: () -> Void = {}
     @State private var imageURL: URL?
 
     private var caption: String? { message.body["text"]?.value as? String }
@@ -189,7 +243,30 @@ struct MessageBubble: View {
     private var mime: String? { message.body["mime"]?.value as? String }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        Group {
+            if chat.deletedIds.contains(message.id) {
+                Text("This message was deleted").italic().foregroundColor(.secondary)
+                    .padding(8).background(Color.secondary.opacity(0.1)).cornerRadius(8)
+            } else {
+                bubbleContent
+            }
+        }
+    }
+
+    private var bubbleContent: some View {
+        HStack(alignment: .top, spacing: 6) {
+            if chat.selectionMode {
+                Image(systemName: chat.selectedIds.contains(message.id) ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(.accentColor)
+                    .onTapGesture { chat.toggleSelect(id: message.id) }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+            if let replyId = message.reply_to {
+                let quoted = chat.messages.first(where: { $0.id == replyId })
+                Text("↩ \(quoted?.body["text"]?.value as? String ?? "original message")")
+                    .font(.caption).foregroundColor(.secondary).lineLimit(2)
+                    .padding(4).background(Color.secondary.opacity(0.12)).cornerRadius(4)
+            }
             switch message.kind {
             case MessageKinds.image:
                 if let u = imageURL {
@@ -233,9 +310,23 @@ struct MessageBubble: View {
                         .font(.caption2).foregroundColor(chat.receiptColor(for: message.id))
                 }
             }
+            }
         }
         .padding(8).background(Color.accentColor.opacity(0.12)).cornerRadius(8)
+        .onTapGesture {
+            if chat.selectionMode { chat.toggleSelect(id: message.id) }
+        }
         .contextMenu {
+            Button("Reply") { onReply() }
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message.body["text"]?.value as? String ?? "", forType: .string)
+            }
+            Button("Forward…") { onForward() }
+            Button(chat.selectionMode ? "Deselect" : "Select") {
+                chat.selectionMode = true; chat.toggleSelect(id: message.id)
+            }
+            Button("Delete", role: .destructive) { chat.deleteMessage(roomId: roomId, messageId: message.id) }
             ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
                 Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
             }
