@@ -5,6 +5,12 @@ public struct ApiException: Error, LocalizedError {
     public var retryAfterSeconds: Int?
     public var errorDescription: String? { message }
     public var isRateLimited: Bool { httpStatus == 429 }
+    public var isUnauthorized: Bool { httpStatus == 401 }
+}
+
+public extension Notification.Name {
+    /// Posted when any API call receives 401: the credential is dead everywhere at once.
+    static let ollacoreUnauthorized = Notification.Name("ollacore.unauthorized")
 }
 
 /// Mirrors Android OllacoreApi.kt — directory plane (session token) + client plane (room token).
@@ -57,6 +63,9 @@ public final class OllacoreAPI {
                 throw ApiException(message: text, code: "unprocessable", httpStatus: 422, retryAfterSeconds: retry)
             }
             let err = try? JSONDecoder().decode(ApiError.self, from: data)
+            if http.statusCode == 401 {
+                NotificationCenter.default.post(name: .ollacoreUnauthorized, object: nil)
+            }
             throw ApiException(message: err?.message ?? "HTTP \(http.statusCode)", code: err?.code, httpStatus: http.statusCode, retryAfterSeconds: retry)
         }
         return try JSONDecoder().decode(T.self, from: data)

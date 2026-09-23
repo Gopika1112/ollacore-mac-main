@@ -11,6 +11,8 @@ public enum ChatEvent {
     case attachmentReady(roomId: String, attachmentId: String), attachmentFailed(roomId: String, attachmentId: String)
     case callStarted(roomId: String, callId: String), callEnded(roomId: String, callId: String)
     case resync(roomId: String), pong
+    case tokenExpired
+    case membershipRevoked
 }
 
 public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
@@ -27,6 +29,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
             onEvent?(.error(code: "invalid_url", message: "Malformed chat WebSocket URL.", requestId: nil))
             return
         }
+        lastURL = url; lastToken = token
         var r = URLRequest(url: wsURL)
         r.setValue("chatbox, bearer.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
         let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
@@ -42,11 +45,21 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     }
     private func listen() {
         task?.receive { [weak self] res in
-            if case .success(.string(let text)) = res, let d = text.data(using: .utf8),
-               let frame = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                self?.handleFrame(frame)
+            guard let self else { return }
+            switch res {
+            case .success(.string(let text)):
+                if let d = text.data(using: .utf8),
+                   let frame = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                    self.handleFrame(frame)
+                }
+                self.listen() // connection alive: keep receiving
+            case .success:
+                self.listen() // non-text frame: ignore payload, stay connected
+            case .failure:
+                break // closed/failed: stop re-arming; close handler owns recovery
+            @unknown default:
+                break
             }
-            self?.listen()
         }
     }
     private func track(room: String, eventId: Int) {
@@ -127,10 +140,39 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public func markRead(roomId: String, messageId: String) {
         send(type: "receipt.read", roomId: roomId, payload: ["message_id": messageId])
     }
-    public func disconnect() { pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
+    public func disconnect() { cancelReconnect(); pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
+    private var reconnectWork: DispatchWorkItem?
+    private var reconnectAttempts = 0
+    private var lastURL: String?
+    private var lastToken: String?
+    private func cancelReconnect() { reconnectWork?.cancel(); reconnectWork = nil; reconnectAttempts = 0 }
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        // 4401 = re-mint + reconnect + catchup; 4403 = do NOT reconnect; 1001 = backoff reconnect.
-        onEvent?(.disconnected(code: code.rawValue))
+        pingTimer?.invalidate(); isConnected = false
+        switch code.rawValue {
+        case 4401:
+            // Token expired mid-session: UI layer re-mints and reconnects (it owns the session).
+            onEvent?(.tokenExpired)
+        case 4403:
+            // Membership revoked: reconnecting is wrong; surface and stay down.
+            onEvent?(.membershipRevoked)
+        case 1001:
+            // Server shutting down: jittered backoff reconnect, capped, catchup resumes.
+            scheduleReconnect()
+        default:
+            cancelReconnect()
+            onEvent?(.disconnected(code: code.rawValue))
+        }
+    }
+    private func scheduleReconnect() {
+        cancelReconnect()
+        guard reconnectAttempts < 5, let url = lastURL, let token = lastToken else {
+            onEvent?(.disconnected(code: 1001)); return
+        }
+        reconnectAttempts += 1
+        let delay = min(30.0, pow(2.0, Double(reconnectAttempts))) + Double.random(in: 0..<1)
+        let work = DispatchWorkItem { [weak self] in self?.connect(url: url, token: token) }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 }
 
@@ -150,13 +192,23 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
     }
     private func listen() {
         task?.receive { [weak self] res in
-            if case .success(.string(let t)) = res, let d = t.data(using: .utf8),
-               let f = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                if f["type"] as? String == "offer" { self?.onEvent?(.offer(sdp: f["sdp"] as? String ?? "", requestId: f["request_id"] as? Int)) }
-                else if f["type"] as? String == "answer" { self?.onEvent?(.answer(sdp: f["sdp"] as? String ?? "")) }
-                else if f["event"] != nil { self?.onEvent?(.ended) }
+            guard let self else { return }
+            switch res {
+            case .success(.string(let t)):
+                if let d = t.data(using: .utf8),
+                   let f = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                    if f["type"] as? String == "offer" { self.onEvent?(.offer(sdp: f["sdp"] as? String ?? "", requestId: f["request_id"] as? Int)) }
+                    else if f["type"] as? String == "answer" { self.onEvent?(.answer(sdp: f["sdp"] as? String ?? "")) }
+                    else if f["event"] != nil { self.onEvent?(.ended) }
+                }
+                self.listen()
+            case .success:
+                self.listen()
+            case .failure:
+                break
+            @unknown default:
+                break
             }
-            self?.listen()
         }
     }
     public func sendOffer(sdp: String) { send(["cmd": "offer", "sdp": ["type": "offer", "sdp": sdp]]) }

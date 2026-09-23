@@ -44,13 +44,23 @@ public enum KeychainHelper {
 /// never written to UserDefaults, never logged.
 public final class RoomTokenCache {
     public static let shared = RoomTokenCache()
-    private var cache: [String: (token: String, wsURL: String, rtcURL: String)] = [:]
+    private static let expiryMargin: TimeInterval = 60
+    private var cache: [String: (token: String, wsURL: String, rtcURL: String, expiresAt: Date?)] = [:]
     private let lock = NSLock()
-    public func get(roomId: String) -> (token: String, wsURL: String, rtcURL: String)? {
-        lock.lock(); defer { lock.unlock() }; return cache[roomId]
+    public func get(roomId: String, now: Date = Date()) -> (token: String, wsURL: String, rtcURL: String)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let e = cache[roomId] else { return nil }
+        // Expired tokens are treated as absent so callers re-mint instead of 401-looping.
+        if let exp = e.expiresAt, now.addingTimeInterval(Self.expiryMargin) >= exp {
+            cache.removeValue(forKey: roomId)
+            return nil
+        }
+        return (e.token, e.wsURL, e.rtcURL)
     }
-    public func set(roomId: String, token: String, wsURL: String, rtcURL: String) {
-        lock.lock(); defer { lock.unlock() }; cache[roomId] = (token, wsURL, rtcURL)
+    public func set(roomId: String, token: String, wsURL: String, rtcURL: String, expiresAt: String? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        let exp = expiresAt.flatMap { ISO8601DateFormatter().date(from: $0) }
+        cache[roomId] = (token, wsURL, rtcURL, exp)
     }
     public func clear() { lock.lock(); defer { lock.unlock() }; cache.removeAll() }
 }

@@ -119,6 +119,7 @@ struct HomeView: View {
         } detail: {
             if let room = selectedRoom, let token = auth.session.sessionToken {
                 ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId, rooms: home.inbox)
+                    .id(room.room_id) // fresh state + socket per room; never recycle across rooms
             } else {
                 Text("Select a conversation").foregroundColor(.secondary)
             }
@@ -146,6 +147,16 @@ struct ChatDetailView: View {
     }
     var body: some View {
         VStack(spacing: 0) {
+            if chat.accessRevoked {
+                Text("You no longer have access to this conversation.").font(.callout).foregroundColor(.red).padding(8)
+            }
+            if let connErr = chat.connectionError {
+                HStack {
+                    Text(connErr).font(.callout).foregroundColor(.orange)
+                    Spacer()
+                    Button("Reconnect") { historyAttempt += 1; chat.connectionError = nil }
+                }.padding(8).background(Color.orange.opacity(0.12))
+            }
             if let call = chat.activeCall {
                 HStack {
                     Image(systemName: "phone.fill").foregroundColor(.green)
@@ -216,9 +227,11 @@ struct ChatDetailView: View {
         }
         .navigationTitle(room.name ?? "Chat")
         .task(id: historyAttempt) {
+            // 4401 recovery: re-mint the room token and reconnect through the same path.
+            chat.onTokenExpired = { historyAttempt += 1 }
             if let rt = try? await OllacoreAPI.shared.roomToken(token: sessionToken, roomId: room.room_id, deviceId: deviceId) {
                 roomToken = rt.access_token; wsUrl = rt.chat_websocket_url
-                await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl, ownId: ownId)
+                await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl, ownId: ownId, expiresAt: rt.expires_at)
                 if chat.historyError == nil { chat.markVisibleAsRead(roomId: room.room_id) }
             }
         }

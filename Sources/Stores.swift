@@ -39,7 +39,20 @@ import SwiftUI
     @Published public var avatarUrl: String?
     public let session = SessionStore()
     private let api: OllacoreAPI
-    public init(api: OllacoreAPI = .shared) { self.api = api; if session.isAuthenticated { step = .authenticated } }
+    public init(api: OllacoreAPI = .shared) {
+        self.api = api
+        if session.isAuthenticated { step = .authenticated }
+        NotificationCenter.default.addObserver(forName: .ollacoreUnauthorized, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.handleUnauthorized() }
+        }
+    }
+    /// Central 401 handling: a dead credential signs out everywhere at once, never stranded.
+    public func handleUnauthorized() {
+        guard step == .authenticated else { return }
+        session.clear()
+        step = .phoneInput
+        error = "Session expired. Please sign in again."
+    }
     /// Backend resend cap is 3/min: space OTP requests 20s apart, surfaced in UI.
     public var resendCooldownSeconds = 20
     public var lastOtpRequestAt: Date?
@@ -115,6 +128,10 @@ public struct FailedDraft: Identifiable {
     @Published public private(set) var deletedIds: Set<String> = []
     @Published public var selectionMode = false
     @Published public private(set) var selectedIds: Set<String> = []
+    @Published public var connectionError: String?
+    @Published public var accessRevoked = false
+    /// Set by the view: re-mint a room token and reconnect after 4401.
+    public var onTokenExpired: (() -> Void)?
     private var pendingFrames: [String: (clientId: String, text: String)] = [:] // frame request_id → send
     public var socket = ChatWebSocket()
     private let api: OllacoreAPI
@@ -124,9 +141,13 @@ public struct FailedDraft: Identifiable {
     public var ownId: String?
     @Published public var historyError: String?
     @Published public var historyLoaded = false
-    public func join(roomToken: String, roomId: String, wsUrl: String, ownId: String? = nil) async {
+    public func join(roomToken: String, roomId: String, wsUrl: String, ownId: String? = nil, expiresAt: String? = nil) async {
         if let ownId { self.ownId = ownId }
+        // Defensive: never stack sockets if join is called twice for any reason.
+        socket.disconnect()
+        socket.onEvent = nil
         currentRoom = roomId; currentToken = roomToken
+        connectionError = nil; accessRevoked = false
         historyError = nil; historyLoaded = false
         do {
             let hist = try await api.listMessages(roomToken: roomToken, roomId: roomId)
@@ -138,7 +159,7 @@ public struct FailedDraft: Identifiable {
             historyError = error.localizedDescription
             return
         }
-        RoomTokenCache.shared.set(roomId: roomId, token: roomToken, wsURL: wsUrl, rtcURL: "")
+        RoomTokenCache.shared.set(roomId: roomId, token: roomToken, wsURL: wsUrl, rtcURL: "", expiresAt: expiresAt)
         socket.onEvent = { [weak self] e in
             Task { @MainActor in
                 guard let self else { return }
@@ -183,8 +204,10 @@ public struct FailedDraft: Identifiable {
                     // Banner only: in-call audio/video UI is not built; never fake an answered call.
                     self.activeCall = (callId, "")
                 case .callEnded: self.activeCall = nil
-                case .error(let code, let msg, _):
-                    if code == "rate_limited" { self.rateLimitedNotice = msg } // WS 429 surfaced, not fatal
+                case .tokenExpired:
+                    self.connectionError = "Session expired. Reopen the chat to reconnect."
+                    self.onTokenExpired?()
+                case .membershipRevoked: self.accessRevoked = true
                 case .resync:
                     // Fell too far behind: refetch history, reset cursor.
                     let fresh = (try? await self.api.listMessages(roomToken: self.currentToken, roomId: self.currentRoom)) ?? []
@@ -256,10 +279,10 @@ public struct FailedDraft: Identifiable {
         Task { _ = await api.removeReaction(roomToken: currentToken, roomId: roomId, messageId: messageId, emoji: emoji) }
     }
     public func markVisibleAsRead(roomId: String) {
-        for m in messages {
-            socket.markRead(roomId: roomId, messageId: m.id)
-        }
-        Task { for m in messages { _ = await api.markRead(roomToken: currentToken, roomId: roomId, messageId: m.id) } }
+        // One receipt for the latest message: the read cursor already covers everything before it.
+        guard let last = messages.last else { return }
+        socket.markRead(roomId: roomId, messageId: last.id)
+        Task { _ = await api.markRead(roomToken: currentToken, roomId: roomId, messageId: last.id) }
     }
     public func dismissCall() { activeCall = nil }
     public var currentSenderId: String? { ownId }
@@ -288,26 +311,34 @@ public struct FailedDraft: Identifiable {
     @Published public var results: [MessageResponse] = []
     @Published public var isSearching = false
     private let api: OllacoreAPI
+    private var generation = 0
     public init(api: OllacoreAPI = .shared) { self.api = api }
     public func search(roomId: String, query: String, sessionToken: String? = nil, deviceId: String? = nil) async {
+        generation += 1
+        let gen = generation
         guard !query.isEmpty else { results = []; return }
-        isSearching = true; defer { isSearching = false }
+        isSearching = true; defer { if gen == generation { isSearching = false } }
         var rt = RoomTokenCache.shared.get(roomId: roomId)
         if rt == nil, let sessionToken, let deviceId {
             // Lazily mint a room token so sidebar search works before the chat is opened.
             if let fresh = try? await api.roomToken(token: sessionToken, roomId: roomId, deviceId: deviceId) {
-                RoomTokenCache.shared.set(roomId: roomId, token: fresh.access_token, wsURL: fresh.chat_websocket_url, rtcURL: fresh.rtc_websocket_url)
+                RoomTokenCache.shared.set(roomId: roomId, token: fresh.access_token, wsURL: fresh.chat_websocket_url, rtcURL: fresh.rtc_websocket_url, expiresAt: fresh.expires_at)
                 rt = RoomTokenCache.shared.get(roomId: roomId)
             }
         }
+        guard gen == generation else { return } // superseded: never publish stale work
         guard let rt else { results = []; return }
         do {
-            results = try await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)
+            let found = try await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)
+            if gen == generation { results = found }
         } catch let e as ApiException where e.isRateLimited {
             // Honor Retry-After: keep prior results, caller may retry after delay.
             try? await Task.sleep(nanoseconds: UInt64(e.retryAfterSeconds ?? 2) * 1_000_000_000)
+            guard gen == generation, !Task.isCancelled else { return }
             results = (try? await api.searchMessages(roomToken: rt.token, roomId: roomId, q: query)) ?? results
-        } catch { results = [] }
+        } catch {
+            if gen == generation { results = [] }
+        }
     }
 }
 

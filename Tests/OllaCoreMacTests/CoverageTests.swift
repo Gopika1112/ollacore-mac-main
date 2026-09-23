@@ -85,6 +85,68 @@ import XCTest
         XCTAssertNil(vm2.error)
     }
 
+    func testSearchRaceKeepsLatest() async {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let url = req.url!.absoluteString
+            let q = URLComponents(string: url)?.queryItems?.first(where: { $0.name == "q" })?.value ?? ""
+            if q == "a" { Thread.sleep(forTimeInterval: 0.3) }
+            let body = #"{"messages":[{"id":"m-\#(q)","room_id":"r","sender_id":"u","kind":"text","body":{"text":"\#(q)"},"created_at":"t","event_seq":1}],"has_more":false}"#
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(body.utf8))
+        }
+        let vm = RoomSearchViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        RoomTokenCache.shared.set(roomId: "r", token: "t", wsURL: "w", rtcURL: "c", expiresAt: "2999-01-01T00:00:00Z")
+        async let s1: Void = vm.search(roomId: "r", query: "a")
+        async let s2: Void = vm.search(roomId: "r", query: "ab")
+        _ = await (s1, s2)
+        XCTAssertEqual(vm.results.first?.body["text"]?.value as? String, "ab")
+        RoomTokenCache.shared.clear()
+    }
+
+    func testExpiredCacheTokenTreatedAsAbsent() {
+        RoomTokenCache.shared.set(roomId: "r", token: "old", wsURL: "w", rtcURL: "c", expiresAt: "2000-01-01T00:00:00Z")
+        XCTAssertNil(RoomTokenCache.shared.get(roomId: "r"))
+        RoomTokenCache.shared.set(roomId: "r", token: "fresh", wsURL: "w", rtcURL: "c", expiresAt: "2999-01-01T00:00:00Z")
+        XCTAssertEqual(RoomTokenCache.shared.get(roomId: "r")?.token, "fresh")
+        RoomTokenCache.shared.clear()
+    }
+
+    func testMarkReadIsSingleCall() async {
+        var reads = 0
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            if req.url!.absoluteString.hasSuffix("/read") { reads += 1 }
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = req.url!.absoluteString.contains("/messages?") || req.url!.absoluteString.contains("/messages?")
+                ? #"{"messages":[{"id":"m1","room_id":"r","sender_id":"peer","kind":"text","body":{"text":"hi"},"created_at":"t","event_seq":1},{"id":"m2","room_id":"r","sender_id":"peer","kind":"text","body":{"text":"yo"},"created_at":"t","event_seq":2}],"has_more":false}"#
+                : "{}"
+            return (resp, Data(body.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        vm.markVisibleAsRead(roomId: "r")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(reads, 1)
+        vm.disconnect()
+    }
+
+    func testUnauthorizedPostsAndLogsOut() async {
+        let posted = expectation(description: "401 notification")
+        let obs = NotificationCenter.default.addObserver(forName: .ollacoreUnauthorized, object: nil, queue: nil) { _ in posted.fulfill() }
+        defer { NotificationCenter.default.removeObserver(obs) }
+        let api = mockApi(status: 401, body: #"{"code":"unauthorized","message":"expired"}"#)
+        _ = try? await api.getInbox(token: "dead")
+        await fulfillment(of: [posted], timeout: 2)
+        let vm = AuthViewModel(api: mockApi(status: 200, body: "{}"))
+        vm.session.save(token: "t", userId: "u")
+        vm.step = .authenticated // simulate a live session; init ran before the save
+        vm.handleUnauthorized()
+        XCTAssertFalse(vm.session.isAuthenticated)
+    }
+
     func testResendCooldown() {
         let vm = AuthViewModel()
         vm.resendCooldownSeconds = 20
