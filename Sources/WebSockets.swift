@@ -23,7 +23,11 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
 
     public func connect(url: String, token: String) {
         // Token is never in the query string (would leak to logs) — subprotocol only.
-        var r = URLRequest(url: URL(string: url)!)
+        guard let wsURL = URL(string: url), wsURL.scheme?.lowercased().hasPrefix("ws") == true else {
+            onEvent?(.error(code: "invalid_url", message: "Malformed chat WebSocket URL.", requestId: nil))
+            return
+        }
+        var r = URLRequest(url: wsURL)
         r.setValue("chatbox, bearer.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
         let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
         task = s.webSocketTask(with: r)
@@ -136,7 +140,11 @@ public final class RtcWebSocket: NSObject, URLSessionWebSocketDelegate {
     private var task: URLSessionWebSocketTask?
     public var onEvent: ((RtcEvent) -> Void)?
     public func connect(url: String, token: String) {
-        var r = URLRequest(url: URL(string: url)!); r.setValue("chatbox, bearer.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        guard let wsURL = URL(string: url), wsURL.scheme?.lowercased().hasPrefix("ws") == true else {
+            onEvent?(.error("Malformed RTC WebSocket URL."))
+            return
+        }
+        var r = URLRequest(url: wsURL); r.setValue("chatbox, bearer.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
         task = URLSession(configuration: .default, delegate: self, delegateQueue: .main).webSocketTask(with: r)
         task?.resume(); listen(); onEvent?(.connected)
     }
