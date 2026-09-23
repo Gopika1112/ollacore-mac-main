@@ -40,7 +40,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         task?.receive { [weak self] res in
             if case .success(.string(let text)) = res, let d = text.data(using: .utf8),
                let frame = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-                self?.handle(frame)
+                self?.handleFrame(frame)
             }
             self?.listen()
         }
@@ -54,7 +54,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
         guard let d = try? JSONSerialization.data(withJSONObject: p) else { return nil }
         return try? JSONDecoder().decode(MessageResponse.self, from: d)
     }
-    private func handle(_ f: [String: Any]) {
+    func handleFrame(_ f: [String: Any]) {
         let type = f["type"] as? String ?? ""
         let roomId = f["room_id"] as? String ?? ""
         let eventId = f["event_id"] as? Int ?? 0
