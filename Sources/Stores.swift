@@ -10,10 +10,19 @@ import SwiftUI
         userId = KeychainHelper.read(account: "user_id")
     }
     public var isAuthenticated: Bool { sessionToken != nil }
-    public func save(token: String, userId: String) {
-        KeychainHelper.save(token, account: "session_token")
-        KeychainHelper.save(userId, account: "user_id")
+    /// Returns false when Keychain storage fails: the caller must NOT treat the
+    /// session as authenticated, or the user appears logged in until restart.
+    @discardableResult
+    public func save(token: String, userId: String) -> Bool {
+        let okToken = KeychainHelper.save(token, account: "session_token")
+        let okUser = KeychainHelper.save(userId, account: "user_id")
+        guard okToken && okUser else {
+            KeychainHelper.delete(account: "session_token")
+            KeychainHelper.delete(account: "user_id")
+            return false
+        }
         self.sessionToken = token; self.userId = userId
+        return true
     }
     public func clear() {
         KeychainHelper.clearAuth()
@@ -78,7 +87,10 @@ import SwiftUI
         isLoading = true; defer { isLoading = false }
         do {
             let r = try await api.verifyOtp(phone: phone, code: otpCode)
-            session.save(token: r.session_token, userId: r.user_id)
+            guard session.save(token: r.session_token, userId: r.user_id) else {
+                error = "Verified, but the session could not be stored securely. Please try again."
+                return
+            }
             displayName = r.display_name; step = .authenticated
         } catch { self.error = error.localizedDescription }
     }
@@ -300,7 +312,8 @@ public struct FailedDraft: Identifiable {
         if let u = attachmentURLs[attachmentId] { return u }
         guard !currentRoom.isEmpty,
               let r = try? await api.downloadAttachment(roomToken: currentToken, roomId: currentRoom, attachmentId: attachmentId),
-              let u = URL(string: r.download_url) else { return nil }
+              let u = URL(string: r.download_url),
+              u.scheme?.lowercased() == "https" else { return nil } // S-05: presigned URLs must be https
         attachmentURLs[attachmentId] = u
         return u
     }

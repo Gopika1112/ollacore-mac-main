@@ -40,7 +40,14 @@ public final class OllacoreAPI {
         c.queryItems = query.isEmpty ? nil : query
         return c.url ?? URL(string: "https://api.ollacore.com/v1/\(encoded)")!
     }
+    /// S-02: credentials travel in headers/subprotocol only — never in the URL,
+    /// so they can't leak into proxy/server access logs or diagnostics.
+    static func urlCarriesCredential(_ url: URL) -> Bool {
+        let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return q.contains { ["token", "access_token", "session_token", "api_key"].contains($0.name.lowercased()) }
+    }
     private func req(url: URL, method: String, sessionToken: String? = nil, roomToken: String? = nil, body: Data? = nil) -> URLRequest {
+        precondition(!Self.urlCarriesCredential(url), "Credential must not appear in URL query")
         var r = URLRequest(url: url)
         r.httpMethod = method
         r.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")

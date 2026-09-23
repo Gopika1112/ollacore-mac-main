@@ -147,6 +147,45 @@ import XCTest
         XCTAssertFalse(vm.session.isAuthenticated)
     }
 
+    func testCredentialNeverInQuery() {
+        XCTAssertTrue(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?access_token=x")!))
+        XCTAssertTrue(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?api_key=x")!))
+        XCTAssertFalse(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?device_id=d&limit=30")!))
+    }
+
+    func testAllowedBase() {
+        XCTAssertTrue(AppConfig.isAllowedBase("https://api.ollacore.com/v1"))
+        XCTAssertTrue(AppConfig.isAllowedBase("https://t.ollacore.com/v1"))
+        XCTAssertTrue(AppConfig.isAllowedBase("http://localhost:8080/v1"))
+        XCTAssertFalse(AppConfig.isAllowedBase("http://api.ollacore.com/v1"))
+        XCTAssertFalse(AppConfig.isAllowedBase("https://evil.example.com/v1"))
+        XCTAssertFalse(AppConfig.isAllowedBase(":::bad:::"))
+    }
+
+    func testSaveReturnsTrueAndSetsSession() {
+        let s = SessionStore()
+        XCTAssertTrue(s.save(token: "t", userId: "u"))
+        XCTAssertTrue(s.isAuthenticated)
+        s.clear()
+    }
+
+    func testNonHttpsDownloadRejected() async {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = req.url!.absoluteString.contains("/download")
+                ? #"{"download_url":"http://insecure.example/f"}"#
+                : #"{"messages":[],"has_more":false}"#
+            return (resp, Data(body.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        let u = await vm.resolveAttachmentURL(attachmentId: "a")
+        XCTAssertNil(u)
+        vm.disconnect()
+    }
+
     func testResendCooldown() {
         let vm = AuthViewModel()
         vm.resendCooldownSeconds = 20

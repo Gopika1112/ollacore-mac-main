@@ -9,3 +9,9 @@ Native macOS SwiftUI chat client for Ollacore (directory + client planes, chat/R
   and the client resyncs from history instead of resuming.
 - Secrets (`OLLACORE_APP_ID`, `SIM_URL`, `SIM_TOKEN`) come from the
   environment only and are never committed. See `.gitignore`.
+- **Token transport (S-02).** Session/room credentials travel in the
+  `Authorization` header and the `Sec-WebSocket-Protocol` subprotocol only,
+  never in URL query strings (enforced in code). Operators must still ensure
+  proxies and diagnostics do not log websocket headers, and must terminate
+  TLS correctly — header redaction is an infrastructure duty this repo cannot
+  perform.
