@@ -122,12 +122,22 @@ public struct FailedDraft: Identifiable {
     private var seenIds: Set<String> = []
     private var currentRoom = "", currentToken = ""
     public var ownId: String?
+    @Published public var historyError: String?
+    @Published public var historyLoaded = false
     public func join(roomToken: String, roomId: String, wsUrl: String, ownId: String? = nil) async {
         if let ownId { self.ownId = ownId }
         currentRoom = roomId; currentToken = roomToken
-        let hist = (try? await api.listMessages(roomToken: roomToken, roomId: roomId)) ?? []
-        messages = hist.sorted { $0.event_seq < $1.event_seq }
-        seenIds = Set(messages.map(\.id))
+        historyError = nil; historyLoaded = false
+        do {
+            let hist = try await api.listMessages(roomToken: roomToken, roomId: roomId)
+            messages = hist.sorted { $0.event_seq < $1.event_seq }
+            seenIds = Set(messages.map(\.id))
+            historyLoaded = true
+        } catch {
+            // Failed history: stay out of the socket and report, instead of an empty room.
+            historyError = error.localizedDescription
+            return
+        }
         RoomTokenCache.shared.set(roomId: roomId, token: roomToken, wsURL: wsUrl, rtcURL: "")
         socket.onEvent = { [weak self] e in
             Task { @MainActor in

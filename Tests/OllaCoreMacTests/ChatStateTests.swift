@@ -17,6 +17,22 @@ import XCTest
         return ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
     }
 
+    func testHistoryFailureStaysOutOfSocket() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (resp, Data("{}".utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        XCTAssertNotNil(vm.historyError)
+        XCTAssertFalse(vm.historyLoaded)
+        XCTAssertTrue(vm.messages.isEmpty)
+        XCTAssertFalse(vm.socket.isConnected)
+        vm.disconnect()
+    }
+
     func testJoinSortsAndSeeds() async throws {
         let vm = vmWithHistory(#"{"messages":[{"id":"b","room_id":"r","sender_id":"u","kind":"text","body":{"text":"2"},"created_at":"t","event_seq":2},{"id":"a","room_id":"r","sender_id":"u","kind":"text","body":{"text":"1"},"created_at":"t","event_seq":1}],"has_more":false}"#)
         await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")

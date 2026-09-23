@@ -140,6 +140,7 @@ struct ChatDetailView: View {
     @State private var wsUrl = ""
     @State private var forwarding: MessageResponse?
     @State private var forwardDone: String?
+    @State private var historyAttempt = 0
     init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = []) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
     }
@@ -162,6 +163,12 @@ struct ChatDetailView: View {
                     Button("Delete") { chat.deleteSelected(roomId: room.room_id) }
                     Button("Clear") { chat.clearSelection() }
                 }.padding(8).background(Color.secondary.opacity(0.12))
+            }
+            if let herr = chat.historyError {
+                VStack(spacing: 8) {
+                    Text("Couldn't load messages: \(herr)").font(.callout).foregroundColor(.red)
+                    Button("Retry") { historyAttempt += 1 }
+                }.padding()
             }
             ScrollView { LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(chat.messages) { m in
@@ -208,11 +215,11 @@ struct ChatDetailView: View {
             }.padding()
         }
         .navigationTitle(room.name ?? "Chat")
-        .task {
+        .task(id: historyAttempt) {
             if let rt = try? await OllacoreAPI.shared.roomToken(token: sessionToken, roomId: room.room_id, deviceId: deviceId) {
                 roomToken = rt.access_token; wsUrl = rt.chat_websocket_url
                 await chat.join(roomToken: roomToken, roomId: room.room_id, wsUrl: wsUrl, ownId: ownId)
-                chat.markVisibleAsRead(roomId: room.room_id)
+                if chat.historyError == nil { chat.markVisibleAsRead(roomId: room.room_id) }
             }
         }
         .onDisappear { chat.disconnect() }

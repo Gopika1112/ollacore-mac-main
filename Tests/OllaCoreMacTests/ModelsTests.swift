@@ -29,6 +29,11 @@ final class ModelsTests: XCTestCase {
         let r = try JSONDecoder().decode(RoomTokenResponse.self, from: d)
         XCTAssertEqual(r.ice_servers.count, 0)
     }
+    func testNullBodyPreserved() throws {
+        let d = Data(#"{"id":"m3","room_id":"r","sender_id":"u","kind":"text","body":{"text":null},"created_at":"t","event_seq":3,"attachment_ids":[]}"#.utf8)
+        let m = try JSONDecoder().decode(MessageResponse.self, from: d)
+        XCTAssertTrue(m.body["text"]?.value is NSNull)
+    }
     func testNestedBodyDecodes() throws {
         let d = Data(#"{"id":"m2","room_id":"r","sender_id":"u","kind":"location","body":{"lat":12.5,"label":"here","tags":["a"]},"created_at":"2026-01-01T00:00:00Z","event_seq":2,"attachment_ids":[]}"#.utf8)
         let m = try JSONDecoder().decode(MessageResponse.self, from: d)

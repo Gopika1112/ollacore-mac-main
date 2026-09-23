@@ -86,24 +86,26 @@ public struct AnyCodable: Codable {
     public init(_ value: Any) { self.value = value }
     public init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
-        if let s = try? c.decode(String.self) { value = s }
+        if c.decodeNil() { value = NSNull() }
+        else if let s = try? c.decode(String.self) { value = s }
         else if let b = try? c.decode(Bool.self) { value = b }
         else if let i = try? c.decode(Int.self) { value = i }
         else if let d = try? c.decode(Double.self) { value = d }
         else if let a = try? c.decode([AnyCodable].self) { value = a.map(\.value) }
         else if let o = try? c.decode([String: AnyCodable].self) { value = o.mapValues { $0.value } }
-        else { value = "" }
+        else { throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unsupported JSON value") }
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.singleValueContainer()
         switch value {
+        case is NSNull: try c.encodeNil()
         case let s as String: try c.encode(s)
         case let b as Bool: try c.encode(b)
         case let i as Int: try c.encode(i)
         case let d as Double: try c.encode(d)
         case let a as [Any]: try c.encode(a.map(AnyCodable.init))
         case let o as [String: Any]: try c.encode(o.mapValues(AnyCodable.init))
-        default: try c.encode(String(describing: value))
+        default: throw EncodingError.invalidValue(value, .init(codingPath: c.codingPath, debugDescription: "Unsupported value"))
         }
     }
 }
