@@ -33,6 +33,39 @@ import XCTest
         vm.disconnect()
     }
 
+    func testRoomSwitchResetsState() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let room = req.url!.absoluteString.contains("/rooms/A/") ? "A" : "B"
+            let body = #"{"messages":[{"id":"m-\#(room)","room_id":"\#(room)","sender_id":"u","kind":"text","body":{"text":"\#(room)"},"created_at":"t","event_seq":1}],"has_more":false}"#
+            return (resp, Data(body.utf8))
+        }
+        let vm = ChatViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        await vm.join(roomToken: "t", roomId: "A", wsUrl: "ws://invalid", ownId: "u")
+        XCTAssertEqual(vm.messages.first?.id, "m-A")
+        await vm.join(roomToken: "t", roomId: "B", wsUrl: "ws://invalid", ownId: "u")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.messages.first?.id, "m-B")
+        XCTAssertEqual(vm.messages.count, 1)
+        vm.disconnect()
+    }
+
+    func testUnicodeAndLongSendTracked() async throws {
+        let vm = vmWithHistory(#"{"messages":[],"has_more":false}"#)
+        await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")
+        let long = String(repeating: "ü", count: 5000)
+        let rid = vm.send(roomId: "r", text: long)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(rid.isEmpty)
+        XCTAssertEqual(vm.sendingCount, 1)
+        vm.socket.onEvent?(.ack(rid))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(vm.sendingCount, 0)
+        vm.disconnect()
+    }
+
     func testJoinSortsAndSeeds() async throws {
         let vm = vmWithHistory(#"{"messages":[{"id":"b","room_id":"r","sender_id":"u","kind":"text","body":{"text":"2"},"created_at":"t","event_seq":2},{"id":"a","room_id":"r","sender_id":"u","kind":"text","body":{"text":"1"},"created_at":"t","event_seq":1}],"has_more":false}"#)
         await vm.join(roomToken: "t", roomId: "r", wsUrl: "ws://invalid", ownId: "u")

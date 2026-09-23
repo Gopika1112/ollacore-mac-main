@@ -147,6 +147,29 @@ import XCTest
         XCTAssertFalse(vm.session.isAuthenticated)
     }
 
+    func testMalformedWsUrlsReportError() {
+        var chatErr: ChatEvent?
+        let ws = ChatWebSocket()
+        ws.onEvent = { chatErr = $0 }
+        ws.connect(url: ":::bad:::", token: "t")
+        XCTAssertFalse(ws.isConnected)
+        if case .error(let code, _, _) = chatErr { XCTAssertEqual(code, "invalid_url") }
+        else { XCTFail("expected invalid_url") }
+        var rtcErr: RtcEvent?
+        let rtc = RtcWebSocket()
+        rtc.onEvent = { rtcErr = $0 }
+        rtc.connect(url: "http://not-ws.example/x", token: "t")
+        if case .error = rtcErr {} else { XCTFail("expected rtc error") }
+    }
+
+    func testExtendedEncodingCases() {
+        let api = OllacoreAPI(session: URLSession(configuration: .ephemeral))
+        let u = api.url(segments: ["rooms", "r %?/ü", "messages"], query: [URLQueryItem(name: "q", value: "héllo wörld")])
+        let s = u.absoluteString
+        XCTAssertFalse(s.contains(" "), s)
+        XCTAssertTrue(s.contains("r%20%25%3F/%C3%BC") || s.contains("r%20%25%3F%2F%C3%BC"), s)
+    }
+
     func testCredentialNeverInQuery() {
         XCTAssertTrue(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?access_token=x")!))
         XCTAssertTrue(OllacoreAPI.urlCarriesCredential(URL(string: "https://h/p?api_key=x")!))
