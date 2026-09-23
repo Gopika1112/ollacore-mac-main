@@ -153,7 +153,11 @@ struct ChatDetailView: View {
             }.padding() }
             HStack {
                 TextField("Message", text: $draft).textFieldStyle(.roundedBorder)
-                Button("Send") { chat.send(roomId: room.room_id, text: draft); draft = "" }.buttonStyle(.borderedProminent)
+                Button("Send") {
+                    let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { return }
+                    chat.send(roomId: room.room_id, text: text); draft = ""
+                }.buttonStyle(.borderedProminent).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding()
         }
         .navigationTitle(room.name ?? "Chat")
@@ -230,7 +234,5 @@ struct MessageBubble: View {
                 Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
             }
         }
-    }
-}
     }
 }
