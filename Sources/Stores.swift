@@ -332,11 +332,13 @@ public struct FailedDraft: Identifiable {
     private let api: OllacoreAPI
     private var generation = 0
     public init(api: OllacoreAPI = .shared) { self.api = api }
+    /// Orphans any in-flight search: its results can never publish afterwards.
+    public func cancel() { generation += 1; isSearching = false }
     public func search(roomId: String, query: String, sessionToken: String? = nil, deviceId: String? = nil) async {
         generation += 1
         let gen = generation
         guard !query.isEmpty else { results = []; return }
-        isSearching = true; defer { if gen == generation { isSearching = false } }
+        isSearching = true; defer { isSearching = false }
         var rt = RoomTokenCache.shared.get(roomId: roomId)
         if rt == nil, let sessionToken, let deviceId {
             // Lazily mint a room token so sidebar search works before the chat is opened.

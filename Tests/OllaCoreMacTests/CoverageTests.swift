@@ -186,6 +186,24 @@ import XCTest
         vm.disconnect()
     }
 
+    func testCancelOrphansInflightSearch() async {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { req in
+            Thread.sleep(forTimeInterval: 0.3)
+            let resp = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (resp, Data(#"{"messages":[{"id":"m","room_id":"r","sender_id":"u","kind":"text","body":{"text":"stale"},"created_at":"t","event_seq":1}],"has_more":false}"#.utf8))
+        }
+        let vm = RoomSearchViewModel(api: OllacoreAPI(session: URLSession(configuration: cfg)))
+        RoomTokenCache.shared.set(roomId: "r", token: "t", wsURL: "w", rtcURL: "c", expiresAt: "2999-01-01T00:00:00Z")
+        let t = Task { await vm.search(roomId: "r", query: "q") }
+        for _ in 0..<5 { await Task.yield() }
+        vm.cancel()
+        await t.value
+        XCTAssertTrue(vm.results.isEmpty)
+        RoomTokenCache.shared.clear()
+    }
+
     func testResendCooldown() {
         let vm = AuthViewModel()
         vm.resendCooldownSeconds = 20

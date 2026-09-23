@@ -77,6 +77,7 @@ struct HomeView: View {
     @Binding var selectedRoom: InboxItem?
     @State private var search = ""
     @StateObject private var roomSearch = RoomSearchViewModel()
+    @State private var searchTask: Task<Void, Never>?
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedRoom) {
@@ -105,8 +106,10 @@ struct HomeView: View {
             }
             .searchable(text: $search)
             .onChange(of: search, initial: false) { _, q in
+                searchTask?.cancel()
+                roomSearch.cancel()
                 if let room = selectedRoom, !q.isEmpty {
-                    Task { await roomSearch.search(roomId: room.room_id, query: q, sessionToken: auth.session.sessionToken, deviceId: auth.session.deviceId) }
+                    searchTask = Task { await roomSearch.search(roomId: room.room_id, query: q, sessionToken: auth.session.sessionToken, deviceId: auth.session.deviceId) }
                 }
             }
             .navigationTitle("Chats")
