@@ -472,6 +472,7 @@ public struct FailedDraft: Identifiable {
         case idle, uploading(filename: String), failed(filename: String, message: String)
     }
     @Published public var uploadState: UploadState = .idle
+    @Published public var uploadProgress: Double = 0
     private var uploadTask: URLSessionUploadTask?
     private var pendingUpload: (data: Data, filename: String, mime: String, kind: String, caption: String?)?
     private var uploadGen = 0
@@ -483,7 +484,7 @@ public struct FailedDraft: Identifiable {
             return
         }
         pendingUpload = (data, filename, mime, kind, caption)
-        uploadState = .uploading(filename: filename)
+        uploadState = .uploading(filename: filename); uploadProgress = 0.05
         Task { await self.runUpload(roomId: roomId) }
     }
     public func cancelUpload() { uploadTask?.cancel(); uploadTask = nil; uploadState = .idle }
@@ -502,6 +503,7 @@ public struct FailedDraft: Identifiable {
         let token = currentToken, room = roomId
         do {
             let initR = try await api.initAttachment(roomToken: token, roomId: room, filename: p.filename, mime: p.mime, byteSize: p.data.count)
+            uploadProgress = 0.2
             guard let putURL = URL(string: initR.upload_url), putURL.scheme?.lowercased() == "https" else {
                 throw ApiException(message: "Invalid upload URL.", code: "bad_upload_url", httpStatus: nil)
             }
@@ -520,6 +522,7 @@ public struct FailedDraft: Identifiable {
             }
             self.uploadTask = nil
             try Task.checkCancellation()
+            uploadProgress = 0.7
             guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else {
                 throw ApiException(message: "Upload failed.", code: "upload_failed", httpStatus: (resp as? HTTPURLResponse)?.statusCode)
             }
@@ -533,6 +536,7 @@ public struct FailedDraft: Identifiable {
             _ = try await api.sendMessage(roomToken: token, roomId: room, clientId: UUID().uuidString, kind: kindForMime(p.mime, requested: p.kind), body: body, attachments: [initR.attachment_id])
             guard gen == uploadGen else { return } // F-01: stale success must not clear a newer upload's state
             pendingUpload = nil
+            uploadProgress = 1.0
             uploadState = .idle
         } catch is CancellationError {
             guard gen == uploadGen else { return }
@@ -656,6 +660,22 @@ public struct FailedDraft: Identifiable {
     public func alias(for roomId: String) -> String? { roomAliases[roomId] }
     public func setAlias(_ a: String, roomId: String) {
         if a.isEmpty { roomAliases.removeValue(forKey: roomId) } else { roomAliases[roomId] = a }
+    }
+}
+
+// MARK: - SearchRecents (local)
+@MainActor public final class SearchRecents: ObservableObject {
+    public static let shared = SearchRecents()
+    @Published public var items: [String] = []
+    private let key = "search_recents_v1"
+    public init() {
+        if let d = UserDefaults.standard.data(forKey: key),
+           let a = try? JSONDecoder().decode([String].self, from: d) { items = a }
+    }
+    public func push(_ q: String) {
+        guard !q.isEmpty else { return }
+        items.removeAll { $0 == q }; items.insert(q, at: 0); items = Array(items.prefix(10))
+        UserDefaults.standard.set(try? JSONEncoder().encode(items), forKey: key)
     }
 }
 

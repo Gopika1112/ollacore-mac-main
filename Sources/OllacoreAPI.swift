@@ -235,4 +235,8 @@ public final class OllacoreAPI {
         guard let body = try? enc(B(platform: platform, push_token: pushToken)) else { return false }
         return await fire(req("/directory/devices", method: "POST", sessionToken: token, body: body))
     }
+    @discardableResult
+    public func deleteDevice(token: String, deviceId: String) async -> Bool {
+        await fire(req(url: url(segments: ["directory", "devices", deviceId]), method: "DELETE", sessionToken: token))
+    }
 }
