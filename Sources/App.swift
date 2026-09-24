@@ -7,21 +7,60 @@ import AVFoundation
     @StateObject private var auth = AuthViewModel()
     @StateObject private var home = HomeViewModel()
     @State private var selectedRoom: InboxItem?
+    @State private var showSplash = true
+    @State private var showOnboarding = false
     var body: some Scene {
         WindowGroup {
             Group {
-                switch auth.step {
-                case .phoneInput: PhoneInputView(vm: auth)
-                case .otp: OtpView(vm: auth)
-                case .authenticated: HomeView(auth: auth, home: home, selectedRoom: $selectedRoom)
+                if showSplash { SplashView() }
+                else if showOnboarding { OnboardingView(done: { showOnboarding = false }) }
+                else {
+                    switch auth.step {
+                    case .phoneInput: PhoneInputView(vm: auth)
+                    case .otp: OtpView(vm: auth)
+                    case .authenticated: HomeView(auth: auth, home: home, selectedRoom: $selectedRoom)
+                    }
                 }
             }.frame(minWidth: 900, minHeight: 600)
                 .onAppear {
-                    // Ensure our window takes keyboard focus when launched from Terminal.
                     NSApp.activate(ignoringOtherApps: true)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        showSplash = false
+                        if UserDefaults.standard.bool(forKey: "seen_onboarding") == false { showOnboarding = true }
+                    }
                 }
         }
         .commands { SidebarCommands() }
+    }
+}
+struct SplashView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("OllaChat").font(.largeTitle).bold()
+            Text("Fast • Secure • Native").foregroundColor(.secondary)
+            ProgressView()
+        }.padding(60)
+    }
+}
+struct OnboardingView: View {
+    var done: () -> Void
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Welcome to OllaChat").font(.title).bold()
+            Text("1. Verify your number\n2. Chat securely\n3. Call & share media").multilineTextAlignment(.center).foregroundColor(.secondary)
+            HStack(spacing: 12) {
+                Button("Get Started") { UserDefaults.standard.set(true, forKey: "seen_onboarding"); done() }.buttonStyle(.borderedProminent)
+                Button("Log in") { UserDefaults.standard.set(true, forKey: "seen_onboarding"); done() }.buttonStyle(.bordered)
+            }
+        }.padding(60)
+    }
+}
+enum E164 {
+    public static func normalize(_ raw: String, defaultCC: String = "1") -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "[()\\-\\s]", with: "", options: .regularExpression)
+        if s.hasPrefix("00") { s = "+" + s.dropFirst(2) }
+        if !s.hasPrefix("+") { s = "+" + defaultCC + s.trimmingCharacters(in: CharacterSet(charactersIn: "+")) }
+        return "+" + s.dropFirst().filter(\.isNumber)
     }
 }
 
@@ -42,8 +81,10 @@ struct PhoneInputView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
                 .focused($phoneFocused)
                 .onAppear { phoneFocused = true }
+                .onChange(of: vm.phone) { _, v in vm.phone = E164.normalize(v) }
             // Diagnostic: proves whether keystrokes reach the binding even if glyphs misrender.
             Text(vm.phone.isEmpty ? " " : "\(vm.phone.count) character(s) entered")
+            Text("By continuing you agree to the Terms.").font(.caption).foregroundColor(.secondary)
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Sending…" : "Continue") { Task { await vm.requestOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
             #if DEBUG
@@ -54,15 +95,33 @@ struct PhoneInputView: View {
 }
 struct OtpView: View {
     @ObservedObject var vm: AuthViewModel
+    @State private var boxes = ["", "", "", "", "", ""]
+    @FocusState private var focusIdx: Int?
     var body: some View {
         VStack(spacing: 16) {
             Text("Verify your number").font(.title2).bold()
             Text("Code sent to \(vm.phone)").foregroundColor(.secondary)
-            TextField("6-digit code", text: $vm.otpCode)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
-                .foregroundColor(.primary)
-                .background(Color(nsColor: .textBackgroundColor))
+            HStack(spacing: 8) {
+                ForEach(0..<6, id: \.self) { i in
+                    TextField("", text: $boxes[i])
+                        .frame(width: 36).multilineTextAlignment(.center)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focusIdx, equals: i)
+                        .onChange(of: boxes[i]) { _, v in
+                            // Paste autofill + auto-advance.
+                            let digits = v.filter(\.isNumber)
+                            if digits.count > 1 {
+                                let chars = Array(digits.prefix(6))
+                                for j in 0..<6 { boxes[j] = j < chars.count ? String(chars[j]) : "" }
+                                focusIdx = min(chars.count, 5)
+                            } else {
+                                boxes[i] = String(digits.prefix(1))
+                                if !boxes[i].isEmpty && i < 5 { focusIdx = i + 1 }
+                            }
+                            vm.otpCode = boxes.joined()
+                        }
+                }
+            }.onAppear { focusIdx = 0 }
             if let e = vm.error { Text(e).foregroundColor(.red).font(.caption) }
             Button(vm.isLoading ? "Verifying…" : "Verify") { Task { await vm.verifyOtp() } }.buttonStyle(.borderedProminent).disabled(vm.isLoading)
             Button(vm.canResend() ? "Resend code" : "Resend in \(vm.resendRemaining())s") { Task { await vm.requestOtp() } }
@@ -86,6 +145,9 @@ struct HomeView: View {
     @State private var showDevices = false
     @State private var showCalls = false
     @State private var searchTask: Task<Void, Never>?
+    @State private var filter = "All"
+    @State private var showContacts = false
+    @State private var showGlobalSearch = false
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedRoom) {
@@ -95,6 +157,13 @@ struct HomeView: View {
                         Button("Retry") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }
                     } header: { Text("Could not refresh") }
                 }
+                Section {
+                    HStack {
+                        ForEach(["All", "Unread", "Groups"], id: \.self) { f in
+                            Button(f) { filter = f }.buttonStyle(f == filter ? .borderedProminent : .bordered).controlSize(.small)
+                        }
+                    }
+                } header: { Text("Filters") }
                 if !home.isLoading && home.error == nil && filtered.isEmpty {
                     Section {
                         VStack(spacing: 8) {
@@ -112,9 +181,20 @@ struct HomeView: View {
                 }
                 Section("Conversations") {
                     ForEach(filtered, id: \.room_id) { item in
-                        VStack(alignment: .leading) {
-                            Text(item.name ?? item.peer?.display_name ?? item.room_id).bold().lineLimit(1)
-                            Text(item.last_message?.preview ?? "No messages").font(.caption).foregroundColor(.secondary).lineLimit(1)
+                        HStack {
+                            VStack(alignment: .leading) {
+                                let title = item.name ?? item.peer?.display_name ?? item.room_id
+                                Text((item.room_id == selectedRoom?.room_id ? "" : "") + title).bold().lineLimit(1)
+                                let preview = item.last_message?.preview ?? "No messages"
+                                let youPrefix = item.last_message?.sender_id != nil ? "" : ""
+                                Text("\(youPrefix)\(preview)").font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                if let ts = item.last_message?.created_at { Text(ts).font(.caption2).foregroundColor(.secondary) }
+                            }
+                            Spacer()
+                            if item.unread_count > 0 {
+                                Text("\(item.unread_count)").font(.caption2).bold()
+                                    .padding(6).background(Color.accentColor).foregroundColor(.white).clipShape(Circle())
+                            }
                         }.tag(item)
                     }
                 }
@@ -144,6 +224,8 @@ struct HomeView: View {
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItemGroup {
+                    Button("Contacts") { showContacts = true }
+                    Button("Search") { showGlobalSearch = true }
                     Button("New DM") { showNewDM = true }
                     Button("New Group") { showNewGroup = true }
                     Button("Profile") { showProfile = true }
@@ -154,6 +236,8 @@ struct HomeView: View {
                     Button("Logout") { selectedRoom = nil; Task { await auth.logout() } }
                 }
             }
+            .sheet(isPresented: $showContacts) { ContactsView(auth: auth, home: home) }
+            .sheet(isPresented: $showGlobalSearch) { GlobalSearchView(auth: auth) }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showNewDM) { NewDMView(auth: auth, home: home) }
             .sheet(isPresented: $showNewGroup) { NewGroupView(auth: auth, home: home) }
@@ -178,9 +262,12 @@ struct HomeView: View {
         .task { if let t = auth.session.sessionToken { await home.refresh(token: t) } }
     }
     var filtered: [InboxItem] {
-        guard !search.isEmpty else { return home.inbox }
+        var list = home.inbox
+        if filter == "Unread" { list = list.filter { $0.unread_count > 0 } }
+        if filter == "Groups" { list = list.filter { $0.kind.lowercased().contains("group") } }
+        guard !search.isEmpty else { return list }
         let q = search.lowercased()
-        return home.inbox.filter {
+        return list.filter {
             ($0.name ?? "").lowercased().contains(q) ||
             ($0.peer?.display_name ?? "").lowercased().contains(q) ||
             $0.room_id.lowercased().contains(q)
@@ -266,6 +353,8 @@ struct ChatDetailView: View {
                 }
                 ForEach(chat.messages) { m in
                     VStack(alignment: .leading, spacing: 4) {
+                        // Date chip: day separator when day changes.
+                        DayChipIfNeeded(messages: chat.messages, current: m)
                         MessageBubble(message: m, roomId: room.room_id, chat: chat,
                                       onReply: { chat.replyTo = m },
                                       onForward: { forwarding = m },
@@ -548,7 +637,8 @@ struct MessageBubble: View {
                 Label("\(lat.map { "\($0)" } ?? "?"), \(lon.map { "\($0)" } ?? "?")", systemImage: "mappin").foregroundColor(.secondary)
                 if let c = caption { Text(c).font(.caption) }
             default:
-                Text(caption ?? "[\(message.kind)]")
+                if let c = caption, let url = URL(string: c), c.hasPrefix("http") { Link(c, destination: url) }
+                else { Text(caption ?? "[\(message.kind)]") }
             }
             HStack(spacing: 6) {
                 if let reacts = chat.reactions[message.id], !reacts.isEmpty {
@@ -581,6 +671,7 @@ struct MessageBubble: View {
                 chat.selectionMode = true; chat.toggleSelect(id: message.id)
             }
             Button("Delete", role: .destructive) { chat.deleteMessage(roomId: roomId, messageId: message.id) }
+            Button(StarStore.shared.ids.contains(message.id) ? "Unstar" : "Star") { StarStore.shared.toggle(message.id) }
             ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
                 Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
                 Button("Remove \(emoji)", role: .destructive) { chat.removeReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
@@ -769,8 +860,7 @@ struct DevicesView: View {
         }
     }
 }
-struct CallsView: View {
-    @StateObject private var log = CallLogStore()
+struct CallsView: View {    @StateObject private var log = CallLogStore()
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
@@ -779,6 +869,82 @@ struct CallsView: View {
             List(log.entries) { e in VStack(alignment: .leading) { Text(e.peerName).bold(); Text("\(e.roomId) • \(e.date.formatted())").font(.caption).foregroundColor(.secondary) } }
                 .frame(minHeight: 160)
             HStack { Button("Clear") { log.clear() }; Spacer(); Button("Close") { dismiss() } }
+        }.padding().frame(width: 380)
+    }
+}
+struct DayChipIfNeeded: View {
+    var messages: [MessageResponse]; var current: MessageResponse
+    var body: some View {
+        let day = String(current.created_at.prefix(10))
+        let idx = messages.firstIndex(where: { $0.id == current.id }) ?? 0
+        let prev = idx > 0 ? String(messages[idx - 1].created_at.prefix(10)) : ""
+        if day != prev {
+            Text(day).font(.caption2).foregroundColor(.secondary)
+                .padding(4).background(Color.secondary.opacity(0.12)).cornerRadius(6)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+}
+struct ContactsView: View {
+    @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
+    @State private var phones = ""; @State private var found: [ContactUser] = []; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Contacts lookup").font(.headline)
+            TextField("phones, comma-separated", text: $phones).textFieldStyle(.roundedBorder)
+            Button("Lookup") {
+                Task {
+                    guard let t = auth.session.sessionToken else { return }
+                    let list = phones.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    do { found = try await OllacoreAPI.shared.lookupContacts(token: t, phones: list) }
+                    catch { msg = error.localizedDescription }
+                }
+            }.buttonStyle(.borderedProminent).disabled(phones.isEmpty)
+            List(found, id: \.user_id) { c in
+                HStack {
+                    VStack(alignment: .leading) { Text(c.display_name ?? c.phone).bold().font(.callout); Text(c.phone).font(.caption).foregroundColor(.secondary) }
+                    Spacer()
+                    Button("Chat") {
+                        Task {
+                            guard let t = auth.session.sessionToken else { return }
+                            if (try? await OllacoreAPI.shared.openDirect(token: t, peerUserId: c.user_id)) != nil {
+                                await home.refresh(token: t); dismiss()
+                            }
+                        }
+                    }.buttonStyle(.link)
+                }
+            }.frame(minHeight: 160)
+            if let msg { Text(msg).font(.caption).foregroundColor(.red) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 400)
+    }
+}
+struct GlobalSearchView: View {
+    @ObservedObject var auth: AuthViewModel
+    @State private var q = ""; @State private var count = 0; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Global search").font(.headline)
+            TextField("Search all chats (room-scoped fan-out)", text: $q).textFieldStyle(.roundedBorder)
+            Button("Search") {
+                Task {
+                    guard let t = auth.session.sessionToken, !q.isEmpty else { return }
+                    do {
+                        let inbox = try await OllacoreAPI.shared.getInbox(token: t)
+                        var total = 0
+                        for room in inbox.prefix(10) {
+                            guard let rt = try? await OllacoreAPI.shared.roomToken(token: t, roomId: room.room_id, deviceId: SessionStore().deviceId) else { continue }
+                            total += (try? await OllacoreAPI.shared.searchMessages(roomToken: rt.access_token, roomId: room.room_id, q: q))?.count ?? 0
+                        }
+                        count = total; msg = total == 0 ? "No matches" : "Found \(total) message(s) across recent chats"
+                    } catch { msg = error.localizedDescription }
+                }
+            }.buttonStyle(.borderedProminent).disabled(q.isEmpty)
+            if let msg { Text(msg).font(.caption).foregroundColor(.secondary) }
+            let _ = count
+            Button("Close") { dismiss() }
         }.padding().frame(width: 380)
     }
 }

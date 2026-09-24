@@ -615,8 +615,7 @@ public struct FailedDraft: Identifiable {
 
 // MARK: - AppSettings (notifications + app lock + theme basics)
 @MainActor public final class AppSettings: ObservableObject {
-    public static let shared = AppSettings()
-    @Published public var notificationsEnabled: Bool {
+    public static let shared = AppSettings()    @Published public var notificationsEnabled: Bool {
         didSet { UserDefaults.standard.set(notificationsEnabled, forKey: "opt_notifications") }
     }
     @Published public var appLockEnabled: Bool {
@@ -645,6 +644,21 @@ public struct FailedDraft: Identifiable {
     public func alias(for roomId: String) -> String? { roomAliases[roomId] }
     public func setAlias(_ a: String, roomId: String) {
         if a.isEmpty { roomAliases.removeValue(forKey: roomId) } else { roomAliases[roomId] = a }
+    }
+}
+
+// MARK: - StarStore (local bookmarks)
+@MainActor public final class StarStore: ObservableObject {
+    public static let shared = StarStore()
+    @Published public var ids: Set<String> = []
+    private let key = "starred_v1"
+    public init() {
+        if let d = UserDefaults.standard.data(forKey: key),
+           let a = try? JSONDecoder().decode([String].self, from: d) { ids = Set(a) }
+    }
+    public func toggle(_ id: String) {
+        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+        UserDefaults.standard.set(try? JSONEncoder().encode(Array(ids)), forKey: key)
     }
 }
 
