@@ -700,19 +700,30 @@ public struct FailedDraft: Identifiable {
     }
 }
 
-// MARK: - StarStore (local bookmarks)
+// MARK: - StarStore (local bookmarks with metadata)
+public struct StarredInfo: Codable { public var id: String; public var sender: String; public var text: String; public var roomId: String; public var roomName: String; public var timestamp: String }
 @MainActor public final class StarStore: ObservableObject {
     public static let shared = StarStore()
     @Published public var ids: Set<String> = []
+    @Published public var meta: [String: StarredInfo] = [:]
     private let key = "starred_v1"
+    private let metaKey = "starred_meta_v1"
     public init() {
         if let d = UserDefaults.standard.data(forKey: key),
            let a = try? JSONDecoder().decode([String].self, from: d) { ids = Set(a) }
+        if let d = UserDefaults.standard.data(forKey: metaKey),
+           let m = try? JSONDecoder().decode([String: StarredInfo].self, from: d) { meta = m }
     }
-    public func toggle(_ id: String) {
-        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+    private func persist() {
         UserDefaults.standard.set(try? JSONEncoder().encode(Array(ids)), forKey: key)
+        UserDefaults.standard.set(try? JSONEncoder().encode(meta), forKey: metaKey)
     }
+    public func toggle(_ id: String, info: StarredInfo? = nil) {
+        if ids.contains(id) { ids.remove(id); meta.removeValue(forKey: id) }
+        else { ids.insert(id); if let info { meta[id] = info } }
+        persist()
+    }
+    public func info(for id: String) -> StarredInfo? { meta[id] }
 }
 
 // MARK: - CallLogStore (mirrors Android CallLogStore — client-only JSON)

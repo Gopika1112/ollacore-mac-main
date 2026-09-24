@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import AVKit
+import PDFKit
 
 // MARK: - App entry (mirrors MainActivity.kt NavHost: splash -> onboarding -> phone -> otp -> home -> chat)
 @main struct OllaCoreMacApp: App {
@@ -120,15 +121,20 @@ struct OtpView: View {
                         .textFieldStyle(.roundedBorder)
                         .focused($focusIdx, equals: i)
                         .onChange(of: boxes[i]) { _, v in
-                            // Paste autofill + auto-advance.
+                            // BUG-NEW-02: paste of N digits into ANY box distributes safely.
                             let digits = v.filter(\.isNumber)
                             if digits.count > 1 {
+                                // Paste: fill all six from digit run (cap 6), ignore non-digits.
                                 let chars = Array(digits.prefix(6))
                                 for j in 0..<6 { boxes[j] = j < chars.count ? String(chars[j]) : "" }
-                                focusIdx = min(chars.count, 5)
+                                focusIdx = chars.count >= 6 ? nil : min(chars.count, 5)
+                            } else if digits.count == 1 {
+                                boxes[i] = digits
+                                if i < 5 { focusIdx = i + 1 } else { focusIdx = nil }
                             } else {
-                                boxes[i] = String(digits.prefix(1))
-                                if !boxes[i].isEmpty && i < 5 { focusIdx = i + 1 }
+                                // Empty/backspace: clear this box, move back if possible.
+                                boxes[i] = ""
+                                if i > 0 { focusIdx = i - 1 }
                             }
                             vm.otpCode = boxes.joined()
                             // P3-13: auto-submit when all 6 entered.
@@ -164,6 +170,7 @@ struct HomeView: View {
     @State private var showGlobalSearch = false
     @State private var showUpdates = false
     @State private var showStarred = false
+    @State private var jumpToMessageId: String? = nil
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedRoom) {
@@ -271,7 +278,12 @@ struct HomeView: View {
             .sheet(isPresented: $showContacts) { ContactsView(auth: auth, home: home) }
             .sheet(isPresented: $showGlobalSearch) { GlobalSearchView(auth: auth) }
             .sheet(isPresented: $showUpdates) { VStack { Text("Updates").font(.headline); Text("Status placeholder — no stories yet.").foregroundColor(.secondary).font(.callout) }.padding().frame(width: 320) }
-            .sheet(isPresented: $showStarred) { StarredView(chatRooms: home.inbox) }
+            .sheet(isPresented: $showStarred) { StarredView(chatRooms: home.inbox, onJump: { roomId, msgId in
+                if let room = home.inbox.first(where: { $0.room_id == roomId }) {
+                    selectedRoom = room
+                    jumpToMessageId = msgId
+                }
+            }) }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showNewDM) { NewDMView(auth: auth, home: home) }
             .sheet(isPresented: $showNewGroup) { NewGroupView(auth: auth, home: home) }
@@ -280,7 +292,7 @@ struct HomeView: View {
             .sheet(isPresented: $showCalls) { CallsView() }
         } detail: {
             if let room = selectedRoom, let token = auth.session.sessionToken {
-                ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId, rooms: home.inbox)
+                ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId, rooms: home.inbox, jumpToMessageId: $jumpToMessageId)
                     .id(room.room_id) // fresh state + socket per room; never recycle across rooms
             } else {
                 VStack(spacing: 12) {
@@ -294,6 +306,11 @@ struct HomeView: View {
             }
         }
         .task { if let t = auth.session.sessionToken { await home.refresh(token: t) } }
+        // Dock unread badge: total non-own unread, zero clears.
+        .onChange(of: home.inbox.map(\.unread_count).reduce(0, +)) { _, total in
+            let n = max(0, total)
+            NSApp.dockTile.badgeLabel = n == 0 ? "" : "\(n)"
+        }
     }
     var filtered: [InboxItem] {
         var list = home.inbox
@@ -333,8 +350,11 @@ struct ChatDetailView: View {
     @State private var showEmoji = false
     @State private var showPreview = false
     @State private var previewCaption = ""
-    init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = []) {
+    @State private var pendingPick: PendingPick? = nil
+    @Binding var jumpToMessageId: String?
+    init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = [], jumpToMessageId: Binding<String?>? = nil) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
+        self._jumpToMessageId = jumpToMessageId ?? .constant(nil)
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -462,7 +482,19 @@ struct ChatDetailView: View {
                     } header: { Text("Not sent").font(.caption).foregroundColor(.red) }
                 }
             }.padding() }
+                .onChange(of: jumpToMessageId) { _, target in
+                    guard let target, chat.messages.contains(where: { $0.id == target }) else { return }
+                    withAnimation { proxy.scrollTo(target, anchor: .center) }
+                }
             } // ScrollViewReader
+            .onChange(of: chat.historyLoaded) { _, loaded in
+                // Starred jump: open correct room + scroll if message present.
+                if loaded, let target = jumpToMessageId,
+                   chat.messages.contains(where: { $0.id == target }) {
+                    // Scroll deferred one turn so LazyVStack has laid out.
+                    DispatchQueue.main.async { jumpToMessageId = nil }
+                } else if loaded { jumpToMessageId = nil } // deleted/unavailable: clear safely
+            }
             if let reply = chat.replyTo {
                 HStack {
                     Text("↩ \(reply.body["text"]?.value as? String ?? "[\(reply.kind)]")").font(.caption).lineLimit(1)
@@ -495,7 +527,7 @@ struct ChatDetailView: View {
             HStack {
                 Button { pickAndSend() } label: { Image(systemName: "paperclip") }
                     .help("Attach a file")
-                Button { showPreview = true } label: { Image(systemName: "photo.on.rectangle") }.help("Preview + caption")
+                Button { pickFileForPreview(); showPreview = true } label: { Image(systemName: "photo.on.rectangle") }.help("Preview + caption")
                 Button { showEmoji.toggle() } label: { Image(systemName: "face.smiling") }.help("Emoji")
                 Button { recorder.isRecording ? stopAndSendVoice() : recorder.start() } label: {
                     Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic.circle")
@@ -548,14 +580,37 @@ struct ChatDetailView: View {
         .toolbar { Button("Info") { showInfo = true } }
         .sheet(isPresented: $showInfo) { RoomInfoView(room: room, chat: chat) }
         .sheet(isPresented: $showPreview) {
+            // Genuine preview: file picked FIRST, shown here, uploaded only on Send.
             VStack(spacing: 12) {
-                Text("Attachment caption").font(.headline)
-                TextField("Caption (optional)", text: $previewCaption).textFieldStyle(.roundedBorder)
-                HStack {
-                    Button("Pick file") { showPreview = false; pickAndSendWithCaption(previewCaption) }
-                    Button("Cancel") { showPreview = false }
+                Text("Send attachment").font(.headline)
+                if let pick = pendingPick {
+                    if pick.kind == MessageKinds.image, let img = NSImage(data: pick.data) {
+                        Image(nsImage: img).resizable().scaledToFit().frame(maxHeight: 220).cornerRadius(8)
+                    } else if pick.kind == MessageKinds.video, let u = pick.fileURL {
+                        CachedVideoPlayer(url: u).frame(height: 180)
+                    } else {
+                        Label("\(pick.filename) (\(pick.mime))", systemImage: "doc.fill").font(.callout)
+                    }
+                    Text("\(pick.data.count / 1024) KB").font(.caption2).foregroundColor(.secondary)
+                    TextField("Caption (optional)", text: $previewCaption).textFieldStyle(.roundedBorder)
+                    if let err = pick.error { Text(err).font(.caption).foregroundColor(.red) }
+                    HStack {
+                        Button("Cancel") { pendingPick = nil; previewCaption = ""; showPreview = false }
+                        Button("Send") {
+                            let p = pick; let cap = previewCaption
+                            pendingPick = nil; previewCaption = ""; showPreview = false
+                            // uploadGen-protected path; room pinned inside runUpload.
+                            chat.uploadAndSend(roomId: room.room_id, data: p.data, filename: p.filename, mime: p.mime, kind: p.kind, caption: cap.isEmpty ? nil : cap)
+                        }.buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    Text("No file selected").foregroundColor(.secondary).font(.callout)
+                    HStack {
+                        Button("Pick file") { pickFileForPreview() }
+                        Button("Cancel") { showPreview = false }
+                    }
                 }
-            }.padding().frame(width: 340)
+            }.padding().frame(width: 380)
         }
         .sheet(item: $editing) { msg in
             VStack(spacing: 12) {
@@ -612,6 +667,34 @@ struct ChatDetailView: View {
         guard let data = try? Data(contentsOf: url) else { recorder.discardConsumed(url); return }
         chat.uploadAndSend(roomId: room.room_id, data: data, filename: "voice-\(Int(Date().timeIntervalSince1970)).m4a", mime: "audio/mp4", kind: MessageKinds.audio)
         recorder.discardConsumed(url)
+    }
+
+    private func pickFileForPreview() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let data = try? Data(contentsOf: url) else {
+            pendingPick = PendingPick(data: Data(), filename: url.lastPathComponent, mime: "", kind: "", fileURL: nil, error: "Could not read file.")
+            return
+        }
+        if data.count > 100 * 1024 * 1024 {
+            pendingPick = PendingPick(data: Data(), filename: url.lastPathComponent, mime: "", kind: "", fileURL: nil, error: "File exceeds 100MB limit.")
+            return
+        }
+        let ext = url.pathExtension.lowercased()
+        let mime: String; let kind: String
+        switch ext {
+        case "png": mime = "image/png"; kind = MessageKinds.image
+        case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
+        case "gif": mime = "image/gif"; kind = MessageKinds.image
+        case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
+        case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
+        case "pdf": mime = "application/pdf"; kind = MessageKinds.file
+        default: mime = "application/octet-stream"; kind = MessageKinds.file
+        }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(url.lastPathComponent)
+        try? data.write(to: tmp)
+        pendingPick = PendingPick(data: data, filename: url.lastPathComponent, mime: mime, kind: kind, fileURL: tmp, error: nil)
     }
 
     private func pickAndSendWithCaption(_ caption: String) {
@@ -674,6 +757,8 @@ struct MessageBubble: View {
     @State private var imageURL: URL?
     @State private var showFullImage = false
     @State private var opening = false
+    @State private var showDoc = false
+    @State private var docFile: URL? = nil
 
     private var caption: String? { message.body["text"]?.value as? String }
     private func shareImage() {
@@ -708,7 +793,12 @@ struct MessageBubble: View {
                 dest = FileManager.default.temporaryDirectory.appendingPathComponent(filename ?? aid)
             }
             try? data.write(to: dest)
-            NSWorkspace.shared.open(dest)
+            // In-app PDF: present sheet for pdf, external otherwise.
+            if (filename ?? aid).lowercased().hasSuffix(".pdf") || mime == "application/pdf" {
+                docFile = dest; showDoc = true
+            } else {
+                NSWorkspace.shared.open(dest)
+            }
         }
     }
 
@@ -746,24 +836,19 @@ struct MessageBubble: View {
             switch message.kind {
             case MessageKinds.image:
                 if let u = imageURL {
-                    AsyncImage(url: u) { phase in
-                        switch phase {
-                        case .success(let img): img.resizable().scaledToFit().frame(maxWidth: 320).cornerRadius(8)
-                        case .failure: Label("Image unavailable", systemImage: "photo")
-                        default: ProgressView().frame(width: 200, height: 120)
-                        }
-                    }
+                    ZoomableImage(url: u)
+                        .frame(maxWidth: 320).cornerRadius(8)
                     .onTapGesture { showFullImage = true }
                     .sheet(isPresented: $showFullImage) {
                         VStack {
-                            AsyncImage(url: u) { phase in
-                                switch phase {
-                                case .success(let img): img.resizable().scaledToFit()
-                                case .failure: Label("Image unavailable", systemImage: "photo")
-                                default: ProgressView()
+                            ZoomableImage(url: u).frame(maxWidth: 800, maxHeight: 600)
+                            HStack {
+                                Button("Share") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(u.absoluteString, forType: .string)
                                 }
-                            }.frame(maxWidth: 800, maxHeight: 600)
-                            Button("Close") { showFullImage = false }.padding()
+                                Button("Close") { showFullImage = false }.padding()
+                            }
                         }.padding()
                     }
                 } else {
@@ -796,6 +881,17 @@ struct MessageBubble: View {
                 Button { openAttachment() } label: {
                     Label(filename ?? "Document (tap to open)", systemImage: "doc.fill").foregroundColor(.secondary)
                 }.buttonStyle(.plain).disabled(opening)
+                .sheet(isPresented: $showDoc) {
+                    VStack {
+                        if let f = docFile, f.pathExtension.lowercased() == "pdf" {
+                            PDFDocView(fileURL: f).frame(maxWidth: 700, maxHeight: 550)
+                        } else {
+                            Text(filename ?? "Document").font(.headline)
+                            Text("Preview not available — opened externally.").font(.caption).foregroundColor(.secondary)
+                        }
+                        Button("Close") { showDoc = false }.padding()
+                    }.padding()
+                }
                 if let m = mime { Text(m).font(.caption).foregroundColor(.secondary) }
             case MessageKinds.location:
                 let lat = message.body["lat"]?.value
@@ -838,7 +934,12 @@ struct MessageBubble: View {
                 chat.selectionMode = true; chat.toggleSelect(id: message.id)
             }
             Button("Delete", role: .destructive) { chat.deleteMessage(roomId: roomId, messageId: message.id) }
-            Button(StarStore.shared.ids.contains(message.id) ? "Unstar" : "Star") { StarStore.shared.toggle(message.id) }
+            Button(StarStore.shared.ids.contains(message.id) ? "Unstar" : "Star") {
+                let info = StarredInfo(id: message.id, sender: message.sender_id,
+                    text: message.body["text"]?.value as? String ?? "[\(message.kind)]",
+                    roomId: roomId, roomName: "", timestamp: message.created_at)
+                StarStore.shared.toggle(message.id, info: info)
+            }
             ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
                 Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
                 Button("Remove \(emoji)", role: .destructive) { chat.removeReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
@@ -1119,15 +1220,33 @@ struct LinkifiedText: View {
 }
 struct StarredView: View {
     var chatRooms: [InboxItem]
+    var onJump: ((String, String) -> Void)? = nil
+    @ObservedObject private var stars = StarStore.shared
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
             Text("Starred messages").font(.headline)
-            let ids = StarStore.shared.ids
-            if ids.isEmpty { Text("No starred messages").foregroundColor(.secondary).font(.callout) }
-            List(Array(ids), id: \.self) { id in Text(id).font(.caption) }.frame(minHeight: 160)
+            if stars.ids.isEmpty { Text("No starred messages").foregroundColor(.secondary).font(.callout) }
+            List(Array(stars.ids).sorted(), id: \.self) { id in
+                let info = stars.meta[id]
+                let roomName = info?.roomName.isEmpty == false ? info!.roomName : (chatRooms.first(where: { $0.room_id == info?.roomId })?.name ?? info?.roomId ?? id)
+                HStack {
+                    Image(systemName: "star.fill").foregroundColor(.yellow)
+                    VStack(alignment: .leading) {
+                        Text(info?.text ?? id).lineLimit(2).font(.callout)
+                        Text("\(info?.sender ?? "?") • \(roomName) • \(info?.timestamp ?? "")").font(.caption2).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Open") {
+                        guard let info, !info.roomId.isEmpty else { return }
+                        onJump?(info.roomId, info.id)
+                        dismiss()
+                    }.buttonStyle(.link)
+                    Button("Unstar") { stars.toggle(id) }.buttonStyle(.link)
+                }
+            }.frame(minHeight: 200)
             Button("Close") { dismiss() }
-        }.padding().frame(width: 360)
+        }.padding().frame(width: 440)
     }
 }
 struct StarBadge: View {
@@ -1139,6 +1258,7 @@ struct StarBadge: View {
         }
     }
 }
+struct PendingPick { var data: Data; var filename: String; var mime: String; var kind: String; var fileURL: URL?; var error: String? }
 struct CachedVideoPlayer: View {
     var url: URL
     @State private var player: AVPlayer?
@@ -1158,12 +1278,47 @@ struct AudioPlayerRow: View {
         HStack {
             Button(playing ? "Pause" : "Play") {
                 if player == nil { player = AVPlayer(url: url) }
-                if playing { player?.pause() } else { player?.play() }
-                playing.toggle()
+                if playing { player?.pause(); playing = false }
+                else {
+                    // BUG-NEW-01: restart from beginning after completion.
+                    if let item = player?.currentItem, item.duration.isValid,
+                       item.currentTime() >= item.duration {
+                        player?.seek(to: .zero)
+                    }
+                    player?.play(); playing = true
+                }
             }.buttonStyle(.bordered).controlSize(.small)
             Text(filename ?? "Voice message").font(.caption).lineLimit(1)
-        }.onDisappear { player?.pause() }
+        }
+        .onDisappear { player?.pause() }
+        // BUG-NEW-01: completion resets UI + playhead; scoped to this player's item.
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
+            guard playing, let item = note.object as? AVPlayerItem, item == player?.currentItem else { return }
+            playing = false
+            player?.seek(to: .zero)
+        }
     }
+}
+struct ZoomableImage: View {
+    var url: URL
+    @State private var scale: CGFloat = 1.0
+    var body: some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case .success(let img): img.resizable().scaledToFit().scaleEffect(scale)
+                .gesture(MagnificationGesture().onChanged { scale = max(1.0, min(4.0, $0)) })
+            case .failure: Label("Image unavailable", systemImage: "photo")
+            default: ProgressView().frame(width: 200, height: 120)
+            }
+        }
+    }
+}
+struct PDFDocView: NSViewRepresentable {
+    var fileURL: URL
+    func makeNSView(context: Context) -> PDFView {
+        let v = PDFView(); v.autoScales = true; v.document = PDFDocument(url: fileURL); return v
+    }
+    func updateNSView(_ v: PDFView, context: Context) {}
 }
 struct DayChipIfNeeded: View {
     var messages: [MessageResponse]; var current: MessageResponse
