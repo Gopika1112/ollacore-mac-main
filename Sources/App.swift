@@ -273,7 +273,7 @@ struct ChatDetailView: View {
                         // Multi-attachment: render/open every id, not just [0].
                         if m.attachment_ids.count > 1 {
                             ForEach(m.attachment_ids.dropFirst(), id: \.self) { aid in
-                                AttachmentRow(chat: chat, attachmentId: aid, filename: m.body["filename"]?.value as? String)
+                                AttachmentRow(chat: chat, attachmentId: aid, filename: m.body["filename"]?.value as? String, roomId: room.room_id, roomToken: roomToken)
                             }
                         }
                         if m.edited_at != nil { Text("edited").font(.caption2).foregroundColor(.secondary) }
@@ -410,8 +410,9 @@ struct ChatDetailView: View {
 
     private func stopAndSendVoice() {
         guard let url = recorder.stop() else { return }
-        guard let data = try? Data(contentsOf: url) else { return }
+        guard let data = try? Data(contentsOf: url) else { recorder.discardConsumed(url); return }
         chat.uploadAndSend(roomId: room.room_id, data: data, filename: "voice-\(Int(Date().timeIntervalSince1970)).m4a", mime: "audio/mp4", kind: MessageKinds.audio)
+        recorder.discardConsumed(url)
     }
 
     private func pickAndSend() {
@@ -582,9 +583,7 @@ struct MessageBubble: View {
             Button("Delete", role: .destructive) { chat.deleteMessage(roomId: roomId, messageId: message.id) }
             ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
                 Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
-            }
-            ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
-                Button("Remove \(emoji)") { chat.removeReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
+                Button("Remove \(emoji)", role: .destructive) { chat.removeReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
             }
         }
     }
@@ -639,16 +638,35 @@ struct RoomInfoView: View {
     private var url: URL?
     func start() {
         error = nil
+        // F-07: mic permission gate (macOS may deny); never start blind.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .denied, .restricted: error = "Microphone access denied. Enable it in System Settings."; return
+        case .notDetermined: break // AVAudioRecorder prompts on first use
+        default: break
+        }
         let u = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString.prefix(8)).m4a")
         let st = [AVFormatIDKey: Int(kAudioFormatMPEG4AAC), AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1] as [String: Any]
-        do {
-            rec = try AVAudioRecorder(url: u, settings: st)
-            rec?.record(); url = u; isRecording = true
-        } catch { error = error.localizedDescription }
+        // F-07: construct off the main thread to avoid blocking UI on file/codec setup.
+        Task.detached { [u, st] in
+            let r = try? AVAudioRecorder(url: u, settings: st)
+            await MainActor.run {
+                guard let r else { self.error = "Could not start recording."; return }
+                // Drop any prior unclaimed temp file to avoid leaks.
+                if let old = self.url, old != u { try? FileManager.default.removeItem(at: old) }
+                self.rec = r; self.url = u
+                self.rec?.record(); self.isRecording = true
+            }
+        }
     }
     func stop() -> URL? {
         rec?.stop(); rec = nil; isRecording = false
         return url
+    }
+    func discardConsumed(_ u: URL?) {
+        // Caller deletes the temp file once bytes are read for upload.
+        guard let u, u == url else { return }
+        try? FileManager.default.removeItem(at: u)
+        if url == u { url = nil }
     }
 }
 
@@ -656,11 +674,13 @@ struct RoomInfoView: View {
 struct AttachmentRow: View {
     @ObservedObject var chat: ChatViewModel
     var attachmentId: String; var filename: String?
+    var roomId: String = ""; var roomToken: String = ""
     @State private var opening = false
     var body: some View {
         Button(opening ? "Loading…" : (filename ?? "Attachment \(attachmentId.prefix(8))")) {
             opening = true
-            Task { _ = await chat.resolveAttachmentURL(attachmentId: attachmentId); opening = false }
+            // F-05: pinned room+token, no stale currentRoom/currentToken read.
+            Task { _ = await chat.resolveAttachmentURL(attachmentId: attachmentId, roomId: roomId.isEmpty ? nil : roomId, roomToken: roomToken.isEmpty ? nil : roomToken); opening = false }
         }.font(.caption).buttonStyle(.link)
     }
 }

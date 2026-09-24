@@ -183,8 +183,10 @@ public struct FailedDraft: Identifiable {
         historyError = nil; historyLoaded = false
         // Per-room state never carries over: a recycled VM starts clean.
         receipts.removeAll(); reactions.removeAll()
+        typingUsers.removeAll(); presenceOnline.removeAll(); members.removeAll()
         failedDrafts.removeAll(); pendingFrames.removeAll(); sendingCount = 0
         selectedIds.removeAll(); selectionMode = false
+        deletedIds.removeAll(); attachmentURLs.removeAll()
         isLoadingMore = false; loadingMoreGen = nil
         do {
             let page = try await api.listMessages(roomToken: roomToken, roomId: roomId)
@@ -356,36 +358,47 @@ public struct FailedDraft: Identifiable {
         failedDrafts.removeAll { $0.id == draft.id }
     }
     public func deleteMessage(roomId: String, messageId: String) {
+        let token = currentToken
         socket.deleteMessage(roomId: roomId, messageId: messageId)
-        Task { _ = await api.deleteMessage(roomToken: currentToken, roomId: roomId, messageId: messageId) }
+        Task { _ = await api.deleteMessage(roomToken: token, roomId: roomId, messageId: messageId) }
         deletedIds.insert(messageId) // optimistic tombstone; server echo confirms
     }
     public func forwardMessage(_ msg: MessageResponse, toRoomId: String, sessionToken: String, deviceId: String) async -> Bool {
-        // Fresh id: a forward is a new message (unlike retry, which must reuse the id).
+        // Pin source credentials up front; abort if room switches mid-forward.
+        let gen = joinGen
+        let srcToken = currentToken, srcRoom = msg.room_id
         guard let rt = try? await api.roomToken(token: sessionToken, roomId: toRoomId, deviceId: deviceId) else { return false }
+        guard gen == joinGen else { return false }
         // Re-init attachments in target room: ids are room-scoped, never copy verbatim.
         var newIds: [String] = []
+        var failedCount = 0
         for aid in msg.attachment_ids {
-            guard let dl = try? await api.downloadAttachment(roomToken: currentToken, roomId: msg.room_id, attachmentId: aid),
+            guard let dl = try? await api.downloadAttachment(roomToken: srcToken, roomId: srcRoom, attachmentId: aid),
                   let u = URL(string: dl.download_url),
-                  let (data, _) = try? await URLSession.shared.data(from: u) else { continue }
+                  let (data, _) = try? await URLSession.shared.data(from: u) else { failedCount += 1; continue }
+            guard gen == joinGen else { return false }
             let mime = (msg.body["mime"]?.value as? String) ?? "application/octet-stream"
             let fn = (msg.body["filename"]?.value as? String) ?? aid
             guard let initR = try? await api.initAttachment(roomToken: rt.access_token, roomId: toRoomId, filename: fn, mime: mime, byteSize: data.count),
-                  let putURL = URL(string: initR.upload_url) else { continue }
+                  let putURL = URL(string: initR.upload_url) else { failedCount += 1; continue }
             var req = URLRequest(url: putURL); req.httpMethod = "PUT"
-            let ( _, resp) = (try? await URLSession.shared.upload(for: req, from: data)) ?? (Data(), URLResponse())
-            guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else { continue }
+            let (_, resp) = (try? await URLSession.shared.upload(for: req, from: data)) ?? (Data(), URLResponse())
+            guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else { failedCount += 1; continue }
             if await api.completeAttachment(roomToken: rt.access_token, roomId: toRoomId, attachmentId: initR.attachment_id) {
                 newIds.append(initR.attachment_id)
-            }
+            } else { failedCount += 1 }
         }
+        guard gen == joinGen else { return false }
+        // Media forward with total attachment loss fails loudly instead of sending a naked message.
+        if !msg.attachment_ids.isEmpty && msg.kind != MessageKinds.text && newIds.isEmpty { return false }
         let body = msg.body
-        let atts = newIds.isEmpty ? (msg.attachment_ids.isEmpty ? [] : []) : newIds
-        // Text-only forwards keep empty attachments; media forwards use re-minted ids.
-        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachments: msg.kind == MessageKinds.text ? [] : atts)) != nil
+        let atts: [String] = msg.kind == MessageKinds.text ? [] : newIds
+        _ = failedCount // caller sees Bool; per-item loss tolerated when at least one succeeded
+        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachments: atts)) != nil
     }
     public func editMessage(roomId: String, messageId: String, text: String) {
+        let gen = joinGen
+        let token = currentToken
         // Optimistic update with edited flag.
         if let i = messages.firstIndex(where: { $0.id == messageId }) {
             var b = messages[i].body; b["text"] = AnyCodable(text)
@@ -393,8 +406,9 @@ public struct FailedDraft: Identifiable {
         }
         socket.editMessage(roomId: roomId, messageId: messageId, text: text)
         Task {
-            if let updated = try? await api.editMessage(roomToken: currentToken, roomId: roomId, messageId: messageId, text: text),
-               let i = messages.firstIndex(where: { $0.id == messageId }) { messages[i] = updated }
+            guard let updated = try? await api.editMessage(roomToken: token, roomId: roomId, messageId: messageId, text: text) else { return }
+            guard gen == joinGen, roomId == currentRoom else { return }
+            if let i = messages.firstIndex(where: { $0.id == messageId }) { messages[i] = updated }
         }
     }
     // MARK: Selection
@@ -414,18 +428,21 @@ public struct FailedDraft: Identifiable {
         socket.disconnect()
     }
     public func addReaction(roomId: String, messageId: String, emoji: String) {
+        let token = currentToken
         socket.addReaction(roomId: roomId, messageId: messageId, emoji: emoji)
-        Task { _ = await api.addReaction(roomToken: currentToken, roomId: roomId, messageId: messageId, emoji: emoji) }
+        Task { _ = await api.addReaction(roomToken: token, roomId: roomId, messageId: messageId, emoji: emoji) }
     }
     public func removeReaction(roomId: String, messageId: String, emoji: String) {
+        let token = currentToken
         socket.removeReaction(roomId: roomId, messageId: messageId, emoji: emoji)
-        Task { _ = await api.removeReaction(roomToken: currentToken, roomId: roomId, messageId: messageId, emoji: emoji) }
+        Task { _ = await api.removeReaction(roomToken: token, roomId: roomId, messageId: messageId, emoji: emoji) }
     }
     public func markVisibleAsRead(roomId: String) {
         // One receipt for the latest message: the read cursor already covers everything before it.
         guard let last = messages.last else { return }
+        let token = currentToken
         socket.markRead(roomId: roomId, messageId: last.id)
-        Task { _ = await api.markRead(roomToken: currentToken, roomId: roomId, messageId: last.id) }
+        Task { _ = await api.markRead(roomToken: token, roomId: roomId, messageId: last.id) }
     }
     public func dismissCall() { activeCall = nil }
     public var currentSenderId: String? { ownId }
@@ -459,9 +476,10 @@ public struct FailedDraft: Identifiable {
     }
     public func cancelUpload() { uploadTask?.cancel(); uploadTask = nil; uploadState = .idle }
     public func retryUpload(roomId: String) {
-        guard case .failed = uploadState, pendingUpload != nil else { return }
-        uploadState = .uploading(filename: pendingUpload!.filename)
-        Task { await self.runUpload(roomId: roomId) }
+        guard case .failed = uploadState, let p = pendingUpload else { return }
+        let gen = uploadGen
+        uploadState = .uploading(filename: p.filename)
+        Task { guard gen == uploadGen else { uploadState = .failed(filename: p.filename, message: "Room changed."); return }; await self.runUpload(roomId: roomId) }
     }
     private func runUpload(roomId: String) async {
         guard let p = pendingUpload else { uploadState = .idle; return }
@@ -501,9 +519,11 @@ public struct FailedDraft: Identifiable {
             var body: [String: AnyCodable] = ["mime": AnyCodable(p.mime), "filename": AnyCodable(p.filename)]
             if let c = p.caption { body["text"] = AnyCodable(c) }
             _ = try await api.sendMessage(roomToken: token, roomId: room, clientId: UUID().uuidString, kind: kindForMime(p.mime, requested: p.kind), body: body, attachments: [initR.attachment_id])
+            guard gen == uploadGen else { return } // F-01: stale success must not clear a newer upload's state
             pendingUpload = nil
             uploadState = .idle
         } catch is CancellationError {
+            guard gen == uploadGen else { return }
             uploadState = .idle
         } catch let e as URLError where e.code == .cancelled {
             uploadState = .idle // user-cancelled PUT: quiet, retryable via pendingUpload
@@ -517,12 +537,20 @@ public struct FailedDraft: Identifiable {
         if mime.hasPrefix("audio/") { return MessageKinds.audio }
         return requested.isEmpty ? MessageKinds.file : requested
     }
-    public func resolveAttachmentURL(attachmentId: String) async -> URL? {
-        if let u = attachmentURLs[attachmentId] { return u }
-        guard !currentRoom.isEmpty,
-              let r = try? await api.downloadAttachment(roomToken: currentToken, roomId: currentRoom, attachmentId: attachmentId),
+    public func resolveAttachmentURL(attachmentId: String, roomId: String? = nil, roomToken: String? = nil) async -> URL? {
+        if let u = attachmentURLs[attachmentId] {
+            // F-04: presigned URLs expire; on failure the caller re-fetches (no stale cache reuse on error path).
+            return u
+        }
+        // F-05: pin room+token at call time so a switch mid-fetch can't mix credentials.
+        let room = roomId ?? currentRoom
+        let token = roomToken ?? currentToken
+        guard !room.isEmpty, !token.isEmpty else { return nil }
+        let gen = joinGen
+        guard let r = try? await api.downloadAttachment(roomToken: token, roomId: room, attachmentId: attachmentId),
               let u = URL(string: r.download_url),
               u.scheme?.lowercased() == "https" else { return nil } // S-05: presigned URLs must be https
+        guard gen == joinGen else { return nil }
         attachmentURLs[attachmentId] = u
         return u
     }

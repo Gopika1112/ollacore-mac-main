@@ -78,6 +78,12 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     private func track(room: String, eventId: Int) {
         guard eventId > 0, !room.isEmpty else { return }
         highestSeqByRoom[room] = max(highestSeqByRoom[room] ?? 0, eventId)
+        // F-11: debounce UserDefaults writes (was every event); flush at most every 2s + on disconnect.
+        let now = Date().timeIntervalSince1970
+        if now - lastSeqFlush > 2.0 { flushSeq(); lastSeqFlush = now }
+    }
+    private var lastSeqFlush = 0.0
+    private func flushSeq() {
         UserDefaults.standard.set(try? JSONEncoder().encode(highestSeqByRoom), forKey: seqKey)
     }
     private func decodeMessage(_ payload: [String: Any], roomId: String) -> MessageResponse? {
@@ -172,7 +178,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public func sendTyping(roomId: String, started: Bool) {
         send(type: started ? "typing.started" : "typing.stopped", roomId: roomId, payload: [:])
     }
-    public func disconnect() { cancelReconnect(); pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
+    public func disconnect() { flushSeq(); cancelReconnect(); pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
     private var reconnectWork: DispatchWorkItem?
     private var reconnectAttempts = 0
     private var lastURL: String?
