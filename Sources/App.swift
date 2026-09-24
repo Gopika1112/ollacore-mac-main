@@ -528,6 +528,7 @@ struct ChatDetailView: View {
                 Button("Send") {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return }
+                    typingStopTask?.cancel(); wasTyping = false
                     chat.send(roomId: room.room_id, text: text); draft = ""; drafts.clear(roomId: room.room_id)
                 }.buttonStyle(.borderedProminent).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding()
@@ -586,7 +587,7 @@ struct ChatDetailView: View {
                 roomTokenError = error.localizedDescription
             }
         }
-        .onDisappear { chat.disconnect() }
+        .onDisappear { typingStopTask?.cancel(); chat.disconnect() }
         .sheet(item: $forwarding) { msg in
             VStack(spacing: 12) {
                 Text("Forward message").font(.headline)
@@ -619,7 +620,19 @@ struct ChatDetailView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task.detached {
             guard let data = try? Data(contentsOf: url) else { return }
-            await MainActor.run { chat.uploadAndSend(roomId: room.room_id, data: data, filename: url.lastPathComponent, mime: "application/octet-stream", kind: MessageKinds.file, caption: caption.isEmpty ? nil : caption) }
+            // Preserve real MIME/kind from extension (was octet-stream).
+            let ext = url.pathExtension.lowercased()
+            let mime: String; let kind: String
+            switch ext {
+            case "png": mime = "image/png"; kind = MessageKinds.image
+            case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
+            case "gif": mime = "image/gif"; kind = MessageKinds.image
+            case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
+            case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
+            case "pdf": mime = "application/pdf"; kind = MessageKinds.file
+            default: mime = "application/octet-stream"; kind = MessageKinds.file
+            }
+            await MainActor.run { chat.uploadAndSend(roomId: room.room_id, data: data, filename: url.lastPathComponent, mime: mime, kind: kind, caption: caption.isEmpty ? nil : caption) }
         }
     }
 
@@ -793,10 +806,8 @@ struct MessageBubble: View {
                 LinkifiedText(caption ?? "[\(message.kind)]")
             }
             HStack(spacing: 6) {
-                // BUG-07: starred visual indicator.
-                if StarStore.shared.ids.contains(message.id) {
-                    Image(systemName: "star.fill").font(.caption2).foregroundColor(.yellow)
-                }
+                // Star indicator (observed so toggles re-render).
+                StarBadge(messageId: message.id)
                 if let reacts = chat.reactions[message.id], !reacts.isEmpty {
                     ForEach(reacts.sorted(by: { $0.key < $1.key }), id: \.key) { emoji, count in
                         Text(count > 1 ? "\(emoji) \(count)" : emoji)
@@ -870,8 +881,8 @@ struct RoomInfoView: View {
                 Button("Save alias") { s.setAlias(alias, roomId: room.room_id) }
                 Toggle("Mute", isOn: Binding(get: { s.isMuted(roomId: room.room_id) }, set: { s.setMuted($0, roomId: room.room_id) }))
             }
-            let members = Set(chat.messages.map(\.sender_id)).sorted()
-            Text("Members (\(members.count)): \(members.joined(separator: ", "))").font(.caption)
+            let live = chat.members.isEmpty ? Set(chat.messages.map(\.sender_id)).sorted() : chat.members.sorted()
+            Text("Members (\(live.count)): \(live.joined(separator: ", "))").font(.caption)
             let media = chat.messages.filter { $0.kind != MessageKinds.text }.count
             Text("Messages: \(chat.messages.count) • Media & files: \(media) • Starred: \(StarStore.shared.ids.count)").font(.caption).foregroundColor(.secondary)
             // P3-14: group admin stubs (server endpoints pending — UI ready).
@@ -1119,6 +1130,15 @@ struct StarredView: View {
         }.padding().frame(width: 360)
     }
 }
+struct StarBadge: View {
+    var messageId: String
+    @ObservedObject private var stars = StarStore.shared
+    var body: some View {
+        if stars.ids.contains(messageId) {
+            Image(systemName: "star.fill").font(.caption2).foregroundColor(.yellow)
+        }
+    }
+}
 struct CachedVideoPlayer: View {
     var url: URL
     @State private var player: AVPlayer?
@@ -1127,6 +1147,7 @@ struct CachedVideoPlayer: View {
             if let p = player { VideoPlayer(player: p).frame(height: 220).cornerRadius(8) }
             else { ProgressView().frame(height: 120) }
         }.onAppear { if player == nil { player = AVPlayer(url: url) } }
+        .onDisappear { player?.pause(); player = nil }
     }
 }
 struct AudioPlayerRow: View {
@@ -1141,7 +1162,7 @@ struct AudioPlayerRow: View {
                 playing.toggle()
             }.buttonStyle(.bordered).controlSize(.small)
             Text(filename ?? "Voice message").font(.caption).lineLimit(1)
-        }
+        }.onDisappear { player?.pause() }
     }
 }
 struct DayChipIfNeeded: View {
