@@ -51,7 +51,19 @@ import SwiftUI
     private var authObserver: NSObjectProtocol?
     public init(api: OllacoreAPI = .shared) {
         self.api = api
-        if session.isAuthenticated { step = .authenticated }
+        if session.isAuthenticated {
+            step = .authenticated
+            // P1-6: hydrate profile + device on cold restart.
+            if let t = session.sessionToken {
+                let dev = session.deviceId
+                Task {
+                    _ = await api.registerDevice(token: t, pushToken: dev)
+                    if let p = try? await api.getProfile(token: t) {
+                        displayName = p.display_name; about = p.about; avatarUrl = p.avatar_url ?? p.photo_url
+                    }
+                }
+            }
+        }
         authObserver = NotificationCenter.default.addObserver(forName: .ollacoreUnauthorized, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.handleUnauthorized() }
         }
@@ -82,7 +94,10 @@ import SwiftUI
         guard canResend() else { error = "Wait \(resendRemaining())s before resending the code."; return }
         isLoading = true; defer { isLoading = false }
         do {
-            _ = try await api.requestOtp(phone: phone)
+            // P0-1: normalize at send time, never on keystroke.
+            let normalized = E164.normalize(phone)
+            phone = normalized
+            _ = try await api.requestOtp(phone: normalized)
             lastOtpRequestAt = Date() // cooldown starts only on success; failures stay retryable
             step = .otp
         } catch { self.error = error.localizedDescription }
@@ -151,6 +166,7 @@ public struct FailedDraft: Identifiable {
     @Published public private(set) var selectedIds: Set<String> = []
     @Published public var connectionError: String?
     @Published public var accessRevoked = false
+    @Published public var isConnected = false
     @Published public var typingUsers: Set<String> = []
     @Published public var presenceOnline: [String: Bool] = [:]
     @Published public var members: Set<String> = []
@@ -184,7 +200,7 @@ public struct FailedDraft: Identifiable {
         uploadGen += 1 // a new room orphans any upload bound to the previous one
         let gen = joinGen
         currentRoom = roomId; currentToken = roomToken
-        connectionError = nil; accessRevoked = false
+        connectionError = nil; accessRevoked = false; isConnected = false
         historyError = nil; historyLoaded = false
         // Per-room state never carries over: a recycled VM starts clean.
         receipts.removeAll(); reactions.removeAll()
@@ -222,6 +238,8 @@ public struct FailedDraft: Identifiable {
             Task { @MainActor in
                 guard let self, self.socketSession == sess else { return } // NEW-14: queued event after disconnect dies here
                 switch e {
+                case .connected: self.isConnected = true
+                case .disconnected: self.isConnected = false
                 case .messageCreated(let m):
                     guard self.isCurrentRoom(m.room_id) else { break } // cross-room events never apply
                     guard !self.seenIds.contains(m.id) else { break } // duplicate prevention
@@ -476,6 +494,9 @@ public struct FailedDraft: Identifiable {
     private var uploadTask: URLSessionUploadTask?
     private var pendingUpload: (data: Data, filename: String, mime: String, kind: String, caption: String?)?
     private var uploadGen = 0
+    /// P3-16: staged progress (0.05→0.2→0.7→1.0). True byte-level progress needs a
+    /// URLSessionTaskDelegate (urlSession:task:didSendBodyData:) on a delegate-owned
+    /// session; URLSession.shared has no delegate hook, so stages are honest approximations.
     /// init → PUT presigned → complete → send. Documented endpoints only; single-PUT
     /// (large multipart uploads remain future work and are refused client-side above 100MB).
     public func uploadAndSend(roomId: String, data: Data, filename: String, mime: String, kind: String, caption: String? = nil) {

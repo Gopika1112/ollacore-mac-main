@@ -7,6 +7,7 @@ import AVKit
 @main struct OllaCoreMacApp: App {
     @StateObject private var auth = AuthViewModel()
     @StateObject private var home = HomeViewModel()
+    @StateObject private var settings = AppSettings.shared
     @State private var selectedRoom: InboxItem?
     @State private var showSplash = true
     @State private var showOnboarding = false
@@ -23,6 +24,8 @@ import AVKit
                     }
                 }
             }.frame(minWidth: 900, minHeight: 600)
+                .tint(accentFor(settings.themeRaw))
+                .preferredColorScheme(settings.themeRaw == "dark" ? .dark : settings.themeRaw == "light" ? .light : nil)
                 .onAppear {
                     NSApp.activate(ignoringOtherApps: true)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -33,6 +36,9 @@ import AVKit
         }
         .commands { SidebarCommands() }
     }
+}
+func accentFor(_ theme: String) -> Color {
+    switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; default: return .accentColor }
 }
 struct SplashView: View {
     var body: some View {
@@ -87,7 +93,7 @@ struct PhoneInputView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
                 .focused($phoneFocused)
                 .onAppear { phoneFocused = true }
-                .onChange(of: vm.phone) { _, v in vm.phone = E164.normalize(v) }
+            // P0-1: no per-keystroke normalize (traps backspace); normalized at send time.
             // Diagnostic: proves whether keystrokes reach the binding even if glyphs misrender.
             Text(vm.phone.isEmpty ? " " : "\(vm.phone.count) character(s) entered")
             Text("By continuing you agree to the Terms.").font(.caption).foregroundColor(.secondary)
@@ -125,6 +131,8 @@ struct OtpView: View {
                                 if !boxes[i].isEmpty && i < 5 { focusIdx = i + 1 }
                             }
                             vm.otpCode = boxes.joined()
+                            // P3-13: auto-submit when all 6 entered.
+                            if vm.otpCode.count == 6 { Task { await vm.verifyOtp() } }
                         }
                 }
             }.onAppear { focusIdx = 0 }
@@ -212,6 +220,14 @@ struct HomeView: View {
                         if roomSearch.isSearching { Text("Searching…").font(.caption).foregroundColor(.secondary) }
                         ForEach(roomSearch.results) { m in
                             Text(m.body["text"]?.value as? String ?? "[\(m.kind)]").font(.caption).lineLimit(2)
+                        }
+                    }
+                }
+                // P2-10: recent searches rendered when query empty.
+                if search.isEmpty && !SearchRecents.shared.items.isEmpty {
+                    Section("Recent searches") {
+                        ForEach(SearchRecents.shared.items, id: \.self) { r in
+                            Button(r) { search = r }.buttonStyle(.link)
                         }
                     }
                 }
@@ -313,6 +329,7 @@ struct ChatDetailView: View {
     @State private var editing: MessageResponse?
     @State private var editText = ""
     @State private var wasTyping = false
+    @State private var typingStopTask: Task<Void, Never>?
     @State private var showEmoji = false
     @State private var showPreview = false
     @State private var previewCaption = ""
@@ -321,11 +338,19 @@ struct ChatDetailView: View {
     }
     var body: some View {
         VStack(spacing: 0) {
-            // Header presence line.
+            // Header presence line (DM-aware).
             if !chat.typingUsers.isEmpty || !chat.presenceOnline.isEmpty {
-                let online = chat.presenceOnline.filter { $0.value }.count
-                Text(chat.typingUsers.isEmpty ? "\(online) online" : "\(chat.typingUsers.sorted().joined(separator: ", ")) typing…")
-                    .font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
+                let isDM = room.kind.lowercased().contains("direct")
+                let headerText: String = {
+                    if !chat.typingUsers.isEmpty { return "\(chat.typingUsers.sorted().joined(separator: ", ")) typing…" }
+                    if isDM {
+                        let peerOnline = chat.presenceOnline.values.first(where: { $0 }) != nil
+                        return peerOnline ? "Online" : "Offline"
+                    }
+                    let online = chat.presenceOnline.filter { $0.value }.count
+                    return "\(online) online"
+                }()
+                Text(headerText).font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
             }
             if chat.accessRevoked {
                 Text("You no longer have access to this conversation.").font(.callout).foregroundColor(.red).padding(8)
@@ -350,8 +375,8 @@ struct ChatDetailView: View {
             if !chat.typingUsers.isEmpty {
                 Text("\(chat.typingUsers.sorted().joined(separator: ", ")) typing…").font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
             }
-            // Offline banner (no reachability API — surfaces socket disconnect).
-            if !chat.socket.isConnected && chat.historyLoaded {
+            // Offline banner (reactive via ChatViewModel.isConnected).
+            if !chat.isConnected && chat.historyLoaded {
                 Text("Offline — reconnecting…").font(.caption).foregroundColor(.orange).padding(.horizontal, 8)
             }
             if chat.selectionMode {
@@ -396,6 +421,7 @@ struct ChatDetailView: View {
                                 .frame(maxWidth: .infinity, alignment: .center)
                         } else {
                         MessageBubble(message: m, roomId: room.room_id, chat: chat,
+                                      roomKind: room.kind, isOwn: m.sender_id == ownId,
                                       onReply: { chat.replyTo = m },
                                       onForward: { forwarding = m },
                                       onEdit: { editing = m })
@@ -483,11 +509,20 @@ struct ChatDetailView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
                     .onChange(of: draft) { _, v in
                         drafts.set(v, for: room.room_id)
-                        // BUG-02: send typing frames (throttled by started/stopped transitions).
-                        let started = !v.isEmpty
+                        // P1-7: typing send with 5s inactivity timeout.
+                        let started = !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         if started != wasTyping {
                             wasTyping = started
                             chat.socket.sendTyping(roomId: room.room_id, started: started)
+                        }
+                        typingStopTask?.cancel()
+                        if started {
+                            typingStopTask = Task {
+                                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                                guard !Task.isCancelled else { return }
+                                wasTyping = false
+                                chat.socket.sendTyping(roomId: room.room_id, started: false)
+                            }
                         }
                     }
                 Button("Send") {
@@ -502,7 +537,6 @@ struct ChatDetailView: View {
                     Text("Recording \(recorder.seconds)s… tap stop to send").font(.caption).foregroundColor(.red)
                     Spacer()
                 }.padding(.horizontal)
-                .onAppear { recorder.tick() }
             }
             if showEmoji {
                 HStack { ForEach(["😀", "👍", "❤️", "😂", "🎉", "🙏"], id: \.self) { e in Button(e) { draft += e } } }.padding(.horizontal)
@@ -618,6 +652,8 @@ struct ChatDetailView: View {
 struct MessageBubble: View {
     var message: MessageResponse
     var roomId: String
+    var roomKind: String = "direct"
+    var isOwn: Bool = false
     @ObservedObject var chat: ChatViewModel
     var onReply: () -> Void = {}
     var onForward: () -> Void = {}
@@ -627,6 +663,11 @@ struct MessageBubble: View {
     @State private var opening = false
 
     private var caption: String? { message.body["text"]?.value as? String }
+    private func shareImage() {
+        guard let u = imageURL else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(u.absoluteString, forType: .string)
+    }
     private var senderColor: Color {
         let h = abs(message.sender_id.hashValue)
         return [Color.blue, Color.green, Color.purple, Color.orange, Color.pink][h % 5]
@@ -671,10 +712,12 @@ struct MessageBubble: View {
 
     private var bubbleContent: some View {
         HStack(alignment: .top, spacing: 6) {
-            // Group mini avatar: initial in colored circle.
-            Text(String(message.sender_id.prefix(1)).uppercased())
-                .font(.caption2).bold().foregroundColor(.white)
-                .frame(width: 22, height: 22).background(senderColor).clipShape(Circle())
+            // P2-12: avatar circle only for group incoming messages.
+            if roomKind != "direct" && !isOwn {
+                Text(String(message.sender_id.prefix(1)).uppercased())
+                    .font(.caption2).bold().foregroundColor(.white)
+                    .frame(width: 22, height: 22).background(senderColor).clipShape(Circle())
+            }
             if chat.selectionMode {
                 Image(systemName: chat.selectedIds.contains(message.id) ? "checkmark.circle.fill" : "circle")
                     .foregroundColor(.accentColor)
@@ -714,9 +757,13 @@ struct MessageBubble: View {
                     Label("Image", systemImage: "photo").foregroundColor(.secondary)
                         .task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "", roomId: roomId) }
                 }
-                if let c = caption { Text(c) }
+                HStack(spacing: 6) {
+                    Button("Share") { shareImage() }.font(.caption).buttonStyle(.link)
+                    if let c = caption, !c.isEmpty { Text(c) }
+                }
             case MessageKinds.video:
-                if let u = imageURL { VideoPlayer(player: AVPlayer(url: u)).frame(height: 220).cornerRadius(8) }
+                // P0-4: cached player per URL so re-renders don't reset playback.
+                if let u = imageURL { CachedVideoPlayer(url: u).frame(height: 220).cornerRadius(8) }
                 else {
                     Button { openAttachment() } label: {
                         Label(filename ?? "Video (tap to open)", systemImage: "video.fill").foregroundColor(.secondary)
@@ -725,11 +772,12 @@ struct MessageBubble: View {
                 }
                 if let c = caption { Text(c).font(.caption) }
             case MessageKinds.audio:
-                if let u = imageURL { VideoPlayer(player: AVPlayer(url: u)).frame(height: 60) }
+                // P0-4: dedicated audio UI, no black VideoPlayer box.
+                if let u = imageURL { AudioPlayerRow(url: u, filename: filename) }
                 else {
                     Button { Task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "", roomId: roomId) } } label: {
-                        Label(opening ? "Loading…" : "Voice message (tap to play)", systemImage: "waveform").foregroundColor(.secondary)
-                    }.buttonStyle(.plain).disabled(opening)
+                        Label("Voice message (tap to load)", systemImage: "waveform").foregroundColor(.secondary)
+                    }.buttonStyle(.plain)
                 }
             case MessageKinds.file:
                 Button { openAttachment() } label: {
@@ -825,7 +873,15 @@ struct RoomInfoView: View {
             let members = Set(chat.messages.map(\.sender_id)).sorted()
             Text("Members (\(members.count)): \(members.joined(separator: ", "))").font(.caption)
             let media = chat.messages.filter { $0.kind != MessageKinds.text }.count
-            Text("Messages: \(chat.messages.count) • Media & files: \(media)").font(.caption).foregroundColor(.secondary)
+            Text("Messages: \(chat.messages.count) • Media & files: \(media) • Starred: \(StarStore.shared.ids.count)").font(.caption).foregroundColor(.secondary)
+            // P3-14: group admin stubs (server endpoints pending — UI ready).
+            if room.kind.lowercased().contains("group") {
+                Text("Group admin: add/remove/promote/leave require server endpoints (not yet in OllacoreAPI).").font(.caption2).foregroundColor(.secondary)
+                HStack {
+                    Button("Add member") {}.disabled(true)
+                    Button("Leave") {}.disabled(true)
+                }.buttonStyle(.bordered).controlSize(.small)
+            }
         }.padding().frame(width: 380)
     }
 }
@@ -1034,9 +1090,8 @@ struct CallsView: View {    @StateObject private var log = CallLogStore()
 struct LinkifiedText: View {
     var text: String
     var body: some View {
-        // Multi-link detection: split on whitespace, linkify http(s) tokens with underline.
-        let parts = text.split(separator: " ").map(String.init)
-        return Text(build()).environment(\.openURL, OpenURLAction { url in .handled })
+        // P0-2: no openURL override — SwiftUI opens browser by default.
+        Text(build())
     }
     private func build() -> AttributedString {
         var out = AttributedString()
@@ -1062,6 +1117,31 @@ struct StarredView: View {
             List(Array(ids), id: \.self) { id in Text(id).font(.caption) }.frame(minHeight: 160)
             Button("Close") { dismiss() }
         }.padding().frame(width: 360)
+    }
+}
+struct CachedVideoPlayer: View {
+    var url: URL
+    @State private var player: AVPlayer?
+    var body: some View {
+        Group {
+            if let p = player { VideoPlayer(player: p).frame(height: 220).cornerRadius(8) }
+            else { ProgressView().frame(height: 120) }
+        }.onAppear { if player == nil { player = AVPlayer(url: url) } }
+    }
+}
+struct AudioPlayerRow: View {
+    var url: URL; var filename: String?
+    @State private var player: AVPlayer?
+    @State private var playing = false
+    var body: some View {
+        HStack {
+            Button(playing ? "Pause" : "Play") {
+                if player == nil { player = AVPlayer(url: url) }
+                if playing { player?.pause() } else { player?.play() }
+                playing.toggle()
+            }.buttonStyle(.bordered).controlSize(.small)
+            Text(filename ?? "Voice message").font(.caption).lineLimit(1)
+        }
     }
 }
 struct DayChipIfNeeded: View {
