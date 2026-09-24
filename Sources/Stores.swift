@@ -75,6 +75,7 @@ import SwiftUI
     public func handleUnauthorized() {
         guard step == .authenticated else { return }
         session.clear()
+        DockBadge.clear()
         step = .phoneInput
         error = "Session expired. Please sign in again."
     }
@@ -122,7 +123,7 @@ import SwiftUI
         // Local session always clears (security); a server failure is surfaced, not hidden.
         var serverOk = true
         if let t = session.sessionToken { serverOk = await api.logout(token: t) }
-        session.clear(); step = .phoneInput
+        session.clear(); DockBadge.clear(); step = .phoneInput
         if !serverOk { error = "Signed out on this device; the server did not confirm logout." }
     }
 }

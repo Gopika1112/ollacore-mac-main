@@ -351,6 +351,7 @@ struct ChatDetailView: View {
     @State private var showPreview = false
     @State private var previewCaption = ""
     @State private var pendingPick: PendingPick? = nil
+    @State private var previewLoadTask: Task<Void, Never>? = nil
     @Binding var jumpToMessageId: String?
     init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = [], jumpToMessageId: Binding<String?>? = nil) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
@@ -595,7 +596,7 @@ struct ChatDetailView: View {
                     TextField("Caption (optional)", text: $previewCaption).textFieldStyle(.roundedBorder)
                     if let err = pick.error { Text(err).font(.caption).foregroundColor(.red) }
                     HStack {
-                        Button("Cancel") { pendingPick = nil; previewCaption = ""; showPreview = false }
+                        Button("Cancel") { previewLoadTask?.cancel(); pendingPick = nil; previewCaption = ""; showPreview = false }
                         Button("Send") {
                             let p = pick; let cap = previewCaption
                             pendingPick = nil; previewCaption = ""; showPreview = false
@@ -642,7 +643,7 @@ struct ChatDetailView: View {
                 roomTokenError = error.localizedDescription
             }
         }
-        .onDisappear { typingStopTask?.cancel(); chat.disconnect() }
+        .onDisappear { previewLoadTask?.cancel(); typingStopTask?.cancel(); chat.disconnect() }
         .sheet(item: $forwarding) { msg in
             VStack(spacing: 12) {
                 Text("Forward message").font(.headline)
@@ -670,31 +671,46 @@ struct ChatDetailView: View {
     }
 
     private func pickFileForPreview() {
+        // Main actor: panel only. Heavy I/O goes to Task.detached below.
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let data = try? Data(contentsOf: url) else {
-            pendingPick = PendingPick(data: Data(), filename: url.lastPathComponent, mime: "", kind: "", fileURL: nil, error: "Could not read file.")
-            return
-        }
-        if data.count > 100 * 1024 * 1024 {
-            pendingPick = PendingPick(data: Data(), filename: url.lastPathComponent, mime: "", kind: "", fileURL: nil, error: "File exceeds 100MB limit.")
-            return
-        }
+        previewLoadTask?.cancel()
+        let roomIdAtPick = room.room_id
+        let filename = url.lastPathComponent
         let ext = url.pathExtension.lowercased()
-        let mime: String; let kind: String
-        switch ext {
-        case "png": mime = "image/png"; kind = MessageKinds.image
-        case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
-        case "gif": mime = "image/gif"; kind = MessageKinds.image
-        case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
-        case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
-        case "pdf": mime = "application/pdf"; kind = MessageKinds.file
-        default: mime = "application/octet-stream"; kind = MessageKinds.file
+        pendingPick = PendingPick(data: Data(), filename: filename, mime: "", kind: "", fileURL: nil, error: "Loading…")
+        previewLoadTask = Task {
+            // Single read off-main; classify + thumbnail prep here, no upload.
+            let loaded: (data: Data?, tooBig: Bool) = await Task.detached(priority: .userInitiated) { () -> (Data?, Bool) in
+                guard let d = try? Data(contentsOf: url) else { return (nil, false) }
+                if d.count > 100 * 1024 * 1024 { return (nil, true) }
+                return (d, false)
+            }.value
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard room.room_id == roomIdAtPick else { return } // stale: room switched
+                if let data = loaded.data {
+                    let mime: String; let kind: String
+                    switch ext {
+                    case "png": mime = "image/png"; kind = MessageKinds.image
+                    case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
+                    case "gif": mime = "image/gif"; kind = MessageKinds.image
+                    case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
+                    case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
+                    case "pdf": mime = "application/pdf"; kind = MessageKinds.file
+                    default: mime = "application/octet-stream"; kind = MessageKinds.file
+                    }
+                    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                    try? data.write(to: tmp)
+                    pendingPick = PendingPick(data: data, filename: filename, mime: mime, kind: kind, fileURL: tmp, error: nil)
+                } else if loaded.tooBig {
+                    pendingPick = PendingPick(data: Data(), filename: filename, mime: "", kind: "", fileURL: nil, error: "File exceeds 100MB limit.")
+                } else {
+                    pendingPick = PendingPick(data: Data(), filename: filename, mime: "", kind: "", fileURL: nil, error: "Could not read file.")
+                }
+            }
         }
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(url.lastPathComponent)
-        try? data.write(to: tmp)
-        pendingPick = PendingPick(data: data, filename: url.lastPathComponent, mime: mime, kind: kind, fileURL: tmp, error: nil)
     }
 
     private func pickAndSendWithCaption(_ caption: String) {
@@ -1257,6 +1273,9 @@ struct StarBadge: View {
             Image(systemName: "star.fill").font(.caption2).foregroundColor(.yellow)
         }
     }
+}
+enum DockBadge {
+    static func clear() { NSApp.dockTile.badgeLabel = "" }
 }
 struct PendingPick { var data: Data; var filename: String; var mime: String; var kind: String; var fileURL: URL?; var error: String? }
 struct CachedVideoPlayer: View {
