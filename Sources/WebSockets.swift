@@ -20,8 +20,15 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public private(set) var isConnected = false
     public var onEvent: ((ChatEvent) -> Void)?
     /// Highest processed event_id per room (docs: persist per room, reconnect with catchup + overlap).
+    /// Persisted to UserDefaults so restart resumes instead of full resync.
     public private(set) var highestSeqByRoom: [String: Int] = [:]
+    private let seqKey = "ws_seq_by_room_v1"
     private var pingTimer: Timer?
+    public override init() {
+        super.init()
+        if let d = UserDefaults.standard.data(forKey: seqKey),
+           let m = try? JSONDecoder().decode([String: Int].self, from: d) { highestSeqByRoom = m }
+    }
 
     public func connect(url: String, token: String, isReconnect: Bool = false) {
         // Token is never in the query string (would leak to logs) — subprotocol only.
@@ -71,6 +78,7 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     private func track(room: String, eventId: Int) {
         guard eventId > 0, !room.isEmpty else { return }
         highestSeqByRoom[room] = max(highestSeqByRoom[room] ?? 0, eventId)
+        UserDefaults.standard.set(try? JSONEncoder().encode(highestSeqByRoom), forKey: seqKey)
     }
     private func decodeMessage(_ payload: [String: Any], roomId: String) -> MessageResponse? {
         var p = payload; if p["room_id"] == nil { p["room_id"] = roomId }
@@ -157,6 +165,12 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     }
     public func markRead(roomId: String, messageId: String) {
         send(type: "receipt.read", roomId: roomId, payload: ["message_id": messageId])
+    }
+    public func editMessage(roomId: String, messageId: String, text: String) {
+        send(type: "message.edit", roomId: roomId, payload: ["message_id": messageId, "body": ["text": text]])
+    }
+    public func sendTyping(roomId: String, started: Bool) {
+        send(type: started ? "typing.started" : "typing.stopped", roomId: roomId, payload: [:])
     }
     public func disconnect() { cancelReconnect(); pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
     private var reconnectWork: DispatchWorkItem?

@@ -211,6 +211,11 @@ public final class OllacoreAPI {
     public func deleteMessage(roomToken: String, roomId: String, messageId: String) async -> Bool {
         await fire(req(url: url(segments: ["rooms", roomId, "messages", messageId]), method: "DELETE", roomToken: roomToken))
     }
+    /// Edit text message: PATCH /v1/rooms/{id}/messages/{messageId} {body:{text}}.
+    public func editMessage(roomToken: String, roomId: String, messageId: String, text: String) async throws -> MessageResponse {
+        struct B: Encodable { var body: [String: String] }
+        return try await exec(req(url: url(segments: ["rooms", roomId, "messages", messageId]), method: "PATCH", roomToken: roomToken, body: try enc(B(body: ["text": text]))))
+    }
     /// Documented endpoint: GET /v1/rooms/{room_id}/messages/search?q=&limit= (Client API).
     public func searchMessages(roomToken: String, roomId: String, q: String, limit: Int = 20) async throws -> [MessageResponse] {
         struct R: Decodable { var messages: [MessageResponse]; var has_more: Bool }

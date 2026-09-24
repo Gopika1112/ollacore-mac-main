@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 
 // MARK: - App entry (mirrors MainActivity.kt NavHost: splash -> onboarding -> phone -> otp -> home -> chat)
 @main struct OllaCoreMacApp: App {
@@ -77,6 +78,13 @@ struct HomeView: View {
     @Binding var selectedRoom: InboxItem?
     @State private var search = ""
     @StateObject private var roomSearch = RoomSearchViewModel()
+    @StateObject private var settings = AppSettings.shared
+    @State private var showSettings = false
+    @State private var showNewDM = false
+    @State private var showNewGroup = false
+    @State private var showProfile = false
+    @State private var showDevices = false
+    @State private var showCalls = false
     @State private var searchTask: Task<Void, Never>?
     var body: some View {
         NavigationSplitView {
@@ -86,6 +94,21 @@ struct HomeView: View {
                         Text(e).font(.caption).foregroundColor(.red)
                         Button("Retry") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }
                     } header: { Text("Could not refresh") }
+                }
+                if !home.isLoading && home.error == nil && filtered.isEmpty {
+                    Section {
+                        VStack(spacing: 8) {
+                            Image(systemName: "bubble.left.and.bubble.right").font(.largeTitle).foregroundColor(.secondary)
+                            // Empty state with retry.
+                            Text(search.isEmpty ? "No conversations yet" : "No matches for \"\(search)\"").font(.callout).foregroundColor(.secondary)
+                            if search.isEmpty {
+                                Button("Refresh") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }.buttonStyle(.link)
+                            }
+                        }.frame(maxWidth: .infinity).padding(.vertical, 24)
+                    }
+                }
+                if home.isLoading && home.inbox.isEmpty {
+                    Section { ProgressView("Loading…").frame(maxWidth: .infinity) }
                 }
                 Section("Conversations") {
                     ForEach(filtered, id: \.room_id) { item in
@@ -121,22 +144,47 @@ struct HomeView: View {
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItemGroup {
+                    Button("New DM") { showNewDM = true }
+                    Button("New Group") { showNewGroup = true }
+                    Button("Profile") { showProfile = true }
+                    Button("Devices") { showDevices = true }
+                    Button("Calls") { showCalls = true }
                     Button("Refresh") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }
+                    Button("Settings") { showSettings = true }
                     Button("Logout") { selectedRoom = nil; Task { await auth.logout() } }
                 }
             }
+            .sheet(isPresented: $showSettings) { SettingsView() }
+            .sheet(isPresented: $showNewDM) { NewDMView(auth: auth, home: home) }
+            .sheet(isPresented: $showNewGroup) { NewGroupView(auth: auth, home: home) }
+            .sheet(isPresented: $showProfile) { ProfileView(auth: auth) }
+            .sheet(isPresented: $showDevices) { DevicesView(auth: auth) }
+            .sheet(isPresented: $showCalls) { CallsView() }
         } detail: {
             if let room = selectedRoom, let token = auth.session.sessionToken {
                 ChatDetailView(room: room, sessionToken: token, deviceId: auth.session.deviceId, ownId: auth.session.userId, rooms: home.inbox)
                     .id(room.room_id) // fresh state + socket per room; never recycle across rooms
             } else {
-                Text("Select a conversation").foregroundColor(.secondary)
+                VStack(spacing: 12) {
+                    Image(systemName: "message").font(.largeTitle).foregroundColor(.secondary)
+                    Text("Select a conversation").foregroundColor(.secondary)
+                    Text("Pick a chat on the left, or pull to refresh.").font(.caption).foregroundColor(.secondary)
+                    if let e = home.error {
+                        Button("Retry") { Task { if let t = auth.session.sessionToken { await home.refresh(token: t) } } }
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task { if let t = auth.session.sessionToken { await home.refresh(token: t) } }
     }
     var filtered: [InboxItem] {
-        search.isEmpty ? home.inbox : home.inbox.filter { ($0.name ?? "").localizedCaseInsensitiveContains(search) }
+        guard !search.isEmpty else { return home.inbox }
+        let q = search.lowercased()
+        return home.inbox.filter {
+            ($0.name ?? "").lowercased().contains(q) ||
+            ($0.peer?.display_name ?? "").lowercased().contains(q) ||
+            $0.room_id.lowercased().contains(q)
+        }
     }
 }
 extension InboxItem: Hashable { public static func == (l: InboxItem, r: InboxItem) -> Bool { l.room_id == r.room_id }; public func hash(into h: inout Hasher) { h.combine(room_id) } }
@@ -145,6 +193,9 @@ struct ChatDetailView: View {
     var room: InboxItem; var sessionToken: String; var deviceId: String; var ownId: String?
     var rooms: [InboxItem] = []
     @StateObject private var chat = ChatViewModel()
+    @StateObject private var drafts = DraftStore.shared
+    @StateObject private var settings = AppSettings.shared
+    @StateObject private var recorder = VoiceRecorder()
     @State private var draft = ""
     @State private var roomToken = ""
     @State private var wsUrl = ""
@@ -152,6 +203,9 @@ struct ChatDetailView: View {
     @State private var forwardDone: String?
     @State private var historyAttempt = 0
     @State private var roomTokenError: String?
+    @State private var showInfo = false
+    @State private var editing: MessageResponse?
+    @State private var editText = ""
     init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = []) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
     }
@@ -176,6 +230,9 @@ struct ChatDetailView: View {
                 }
                 .padding(8).background(Color.green.opacity(0.12))
                 .accessibilityIdentifier("call_banner_\(call.callId)")
+            }
+            if !chat.typingUsers.isEmpty {
+                Text("\(chat.typingUsers.sorted().joined(separator: ", ")) typing…").font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
             }
             if chat.selectionMode {
                 HStack {
@@ -208,11 +265,30 @@ struct ChatDetailView: View {
                     }
                 }
                 ForEach(chat.messages) { m in
-                    MessageBubble(message: m, roomId: room.room_id, chat: chat,
-                                  onReply: { chat.replyTo = m },
-                                  onForward: { forwarding = m })
+                    VStack(alignment: .leading, spacing: 4) {
+                        MessageBubble(message: m, roomId: room.room_id, chat: chat,
+                                      onReply: { chat.replyTo = m },
+                                      onForward: { forwarding = m },
+                                      onEdit: { editing = m })
+                        // Multi-attachment: render/open every id, not just [0].
+                        if m.attachment_ids.count > 1 {
+                            ForEach(m.attachment_ids.dropFirst(), id: \.self) { aid in
+                                AttachmentRow(chat: chat, attachmentId: aid, filename: m.body["filename"]?.value as? String)
+                            }
+                        }
+                        if m.edited_at != nil { Text("edited").font(.caption2).foregroundColor(.secondary) }
+                        if let online = chat.presenceOnline[m.sender_id] {
+                            Text(online ? "online" : "offline").font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
                 }
-                if !chat.failedDrafts.isEmpty {
+                if chat.historyLoaded && chat.messages.isEmpty && chat.failedDrafts.isEmpty && roomTokenError == nil && chat.historyError == nil {
+                VStack(spacing: 8) {
+                    Image(systemName: "bubble.left").font(.largeTitle).foregroundColor(.secondary)
+                    Text("No messages yet. Say hello!").font(.callout).foregroundColor(.secondary)
+                }.frame(maxWidth: .infinity).padding(.vertical, 32)
+            }
+            if !chat.failedDrafts.isEmpty {
                     Section {
                         ForEach(chat.failedDrafts) { d in
                             HStack {
@@ -257,6 +333,9 @@ struct ChatDetailView: View {
             HStack {
                 Button { pickAndSend() } label: { Image(systemName: "paperclip") }
                     .help("Attach a file")
+                Button { recorder.isRecording ? stopAndSendVoice() : recorder.start() } label: {
+                    Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic.circle")
+                }.help("Record voice message")
                 TextField("Message", text: $draft)
                     .textFieldStyle(.plain)
                     .padding(8)
@@ -264,14 +343,33 @@ struct ChatDetailView: View {
                     .background(Color(nsColor: .textBackgroundColor))
                     .cornerRadius(8)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
+                    .onChange(of: draft) { _, v in drafts.set(v, for: room.room_id) }
                 Button("Send") {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return }
-                    chat.send(roomId: room.room_id, text: text); draft = ""
+                    chat.send(roomId: room.room_id, text: text); draft = ""; drafts.clear(roomId: room.room_id)
                 }.buttonStyle(.borderedProminent).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding()
+            if recorder.isRecording {
+                HStack { Image(systemName: "waveform").foregroundColor(.red); Text("Recording… tap stop to send").font(.caption).foregroundColor(.red); Spacer() }.padding(.horizontal)
+            }
+            if let verr = recorder.error { Text(verr).font(.caption).foregroundColor(.red).padding(.horizontal) }
         }
-        .navigationTitle(room.name ?? "Chat")
+        .navigationTitle(settings.alias(for: room.room_id) ?? room.name ?? "Chat")
+        .toolbar { Button("Info") { showInfo = true } }
+        .sheet(isPresented: $showInfo) { RoomInfoView(room: room, chat: chat) }
+        .sheet(item: $editing) { msg in
+            VStack(spacing: 12) {
+                Text("Edit message").font(.headline)
+                TextField("Text", text: $editText).textFieldStyle(.roundedBorder)
+                    .onAppear { editText = msg.body["text"]?.value as? String ?? "" }
+                HStack {
+                    Button("Cancel") { editing = nil }
+                    Button("Save") { chat.editMessage(roomId: room.room_id, messageId: msg.id, text: editText); editing = nil }.buttonStyle(.borderedProminent)
+                }
+            }.padding().frame(width: 340)
+        }
+        .onAppear { draft = drafts.draft(for: room.room_id) }
         .task(id: historyAttempt) {
             // 4401 recovery: re-mint the room token and reconnect through the same path.
             chat.onTokenExpired = { historyAttempt += 1 }
@@ -310,6 +408,12 @@ struct ChatDetailView: View {
         }
     }
 
+    private func stopAndSendVoice() {
+        guard let url = recorder.stop() else { return }
+        guard let data = try? Data(contentsOf: url) else { return }
+        chat.uploadAndSend(roomId: room.room_id, data: data, filename: "voice-\(Int(Date().timeIntervalSince1970)).m4a", mime: "audio/mp4", kind: MessageKinds.audio)
+    }
+
     private func pickAndSend() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -339,6 +443,7 @@ struct MessageBubble: View {
     @ObservedObject var chat: ChatViewModel
     var onReply: () -> Void = {}
     var onForward: () -> Void = {}
+    var onEdit: () -> Void = {}
     @State private var imageURL: URL?
     @State private var showFullImage = false
     @State private var opening = false
@@ -464,6 +569,7 @@ struct MessageBubble: View {
         }
         .contextMenu {
             Button("Reply") { onReply() }
+            Button("Edit…") { onEdit() }
             Button("Save attachment…") { openAttachment(savePanel: true) }
             Button("Copy") {
                 NSPasteboard.general.clearContents()
@@ -477,6 +583,182 @@ struct MessageBubble: View {
             ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
                 Button("React \(emoji)") { chat.addReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
             }
+            ForEach(["👍", "❤️", "😂", "😮", "😢"], id: \.self) { emoji in
+                Button("Remove \(emoji)") { chat.removeReaction(roomId: roomId, messageId: message.id, emoji: emoji) }
+            }
         }
+    }
+}
+
+// MARK: - Settings (notifications + app lock + theme)
+struct SettingsView: View {
+    @StateObject private var s = AppSettings.shared
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings").font(.headline)
+            Toggle("Notifications", isOn: $s.notificationsEnabled)
+            Toggle("App lock on launch", isOn: $s.appLockEnabled)
+            Picker("Theme", selection: $s.themeRaw) {
+                Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
+            }.pickerStyle(.segmented)
+            Text("Stored locally in UserDefaults; no server call.").font(.caption).foregroundColor(.secondary)
+        }.padding().frame(width: 340)
+    }
+}
+
+// MARK: - Contact/group info panel (alias, mute, members, media counts)
+struct RoomInfoView: View {
+    var room: InboxItem
+    @ObservedObject var chat: ChatViewModel
+    @StateObject private var s = AppSettings.shared
+    @State private var alias = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Conversation info").font(.headline)
+            Text(room.name ?? room.peer?.display_name ?? room.room_id).bold()
+            Text(room.room_id).font(.caption).foregroundColor(.secondary)
+            TextField("Alias (local only)", text: $alias).textFieldStyle(.roundedBorder)
+                .onAppear { alias = s.alias(for: room.room_id) ?? "" }
+            HStack {
+                Button("Save alias") { s.setAlias(alias, roomId: room.room_id) }
+                Toggle("Mute", isOn: Binding(get: { s.isMuted(roomId: room.room_id) }, set: { s.setMuted($0, roomId: room.room_id) }))
+            }
+            let members = Set(chat.messages.map(\.sender_id)).sorted()
+            Text("Members (\(members.count)): \(members.joined(separator: ", "))").font(.caption)
+            let media = chat.messages.filter { $0.kind != MessageKinds.text }.count
+            Text("Messages: \(chat.messages.count) • Media & files: \(media)").font(.caption).foregroundColor(.secondary)
+        }.padding().frame(width: 380)
+    }
+}
+
+// MARK: - Voice recorder (AVFoundation, m4a, sent as audio message)
+@MainActor final class VoiceRecorder: ObservableObject {
+    @Published var isRecording = false
+    @Published var error: String?
+    private var rec: AVAudioRecorder?
+    private var url: URL?
+    func start() {
+        error = nil
+        let u = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString.prefix(8)).m4a")
+        let st = [AVFormatIDKey: Int(kAudioFormatMPEG4AAC), AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1] as [String: Any]
+        do {
+            rec = try AVAudioRecorder(url: u, settings: st)
+            rec?.record(); url = u; isRecording = true
+        } catch { error = error.localizedDescription }
+    }
+    func stop() -> URL? {
+        rec?.stop(); rec = nil; isRecording = false
+        return url
+    }
+}
+
+// MARK: - Shared rows + creation/profile/devices/calls
+struct AttachmentRow: View {
+    @ObservedObject var chat: ChatViewModel
+    var attachmentId: String; var filename: String?
+    @State private var opening = false
+    var body: some View {
+        Button(opening ? "Loading…" : (filename ?? "Attachment \(attachmentId.prefix(8))")) {
+            opening = true
+            Task { _ = await chat.resolveAttachmentURL(attachmentId: attachmentId); opening = false }
+        }.font(.caption).buttonStyle(.link)
+    }
+}
+struct NewDMView: View {
+    @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
+    @State private var peer = ""; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("New direct message").font(.headline)
+            TextField("peer user id", text: $peer).textFieldStyle(.roundedBorder)
+            Button("Create") {
+                Task {
+                    guard let t = auth.session.sessionToken else { return }
+                    if (try? await OllacoreAPI.shared.openDirect(token: t, peerUserId: peer)) != nil {
+                        await home.refresh(token: t); dismiss()
+                    } else { msg = "Failed to create DM" }
+                }
+            }.buttonStyle(.borderedProminent).disabled(peer.isEmpty)
+            if let msg { Text(msg).font(.caption).foregroundColor(.red) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 340)
+    }
+}
+struct NewGroupView: View {
+    @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
+    @State private var name = ""; @State private var members = ""; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("New group").font(.headline)
+            TextField("Group name", text: $name).textFieldStyle(.roundedBorder)
+            TextField("member ids, comma-separated", text: $members).textFieldStyle(.roundedBorder)
+            Button("Create") {
+                Task {
+                    guard let t = auth.session.sessionToken else { return }
+                    let ids = members.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    if (try? await OllacoreAPI.shared.createGroup(token: t, members: ids, name: name)) != nil {
+                        await home.refresh(token: t); dismiss()
+                    } else { msg = "Failed to create group" }
+                }
+            }.buttonStyle(.borderedProminent).disabled(name.isEmpty)
+            if let msg { Text(msg).font(.caption).foregroundColor(.red) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 360)
+    }
+}
+struct ProfileView: View {
+    @ObservedObject var auth: AuthViewModel
+    @State private var name = ""; @State private var about = ""; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Profile").font(.headline)
+            TextField("Display name", text: $name).textFieldStyle(.roundedBorder)
+                .onAppear { name = auth.displayName ?? "" }
+            TextField("About", text: $about).textFieldStyle(.roundedBorder)
+            Button("Save") {
+                Task {
+                    guard let t = auth.session.sessionToken else { return }
+                    if let p = try? await OllacoreAPI.shared.updateProfile(token: t, req: UpdateProfileRequest(display_name: name, about: about, avatar_url: nil)) {
+                        auth.displayName = p.display_name; msg = "Saved"
+                    } else { msg = "Save failed" }
+                }
+            }.buttonStyle(.borderedProminent)
+            if let msg { Text(msg).font(.caption).foregroundColor(.secondary) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 340)
+    }
+}
+struct DevicesView: View {
+    @ObservedObject var auth: AuthViewModel
+    @State private var devices: [DeviceResponse] = []; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Devices").font(.headline)
+            List(devices) { d in VStack(alignment: .leading) { Text(d.id).font(.caption).bold(); Text("\(d.platform) • \(d.updated_at)").font(.caption).foregroundColor(.secondary) } }
+                .frame(minHeight: 160)
+            if let msg { Text(msg).font(.caption).foregroundColor(.red) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 380)
+        .task {
+            guard let t = auth.session.sessionToken else { return }
+            do { devices = try await OllacoreAPI.shared.listDevices(token: t) } catch { msg = error.localizedDescription }
+        }
+    }
+}
+struct CallsView: View {
+    @StateObject private var log = CallLogStore()
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Call history").font(.headline)
+            if log.entries.isEmpty { Text("No calls yet").foregroundColor(.secondary).font(.callout) }
+            List(log.entries) { e in VStack(alignment: .leading) { Text(e.peerName).bold(); Text("\(e.roomId) • \(e.date.formatted())").font(.caption).foregroundColor(.secondary) } }
+                .frame(minHeight: 160)
+            HStack { Button("Clear") { log.clear() }; Spacer(); Button("Close") { dismiss() } }
+        }.padding().frame(width: 380)
     }
 }

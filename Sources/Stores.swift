@@ -146,6 +146,9 @@ public struct FailedDraft: Identifiable {
     @Published public private(set) var selectedIds: Set<String> = []
     @Published public var connectionError: String?
     @Published public var accessRevoked = false
+    @Published public var typingUsers: Set<String> = []
+    @Published public var presenceOnline: [String: Bool] = [:]
+    @Published public var members: Set<String> = []
     /// Set by the view: re-mint a room token and reconnect after 4401.
     public var onTokenExpired: (() -> Void)?
     private var pendingFrames: [String: (clientId: String, text: String)] = [:] // frame request_id → send
@@ -251,6 +254,18 @@ public struct FailedDraft: Identifiable {
                     m[emoji, default: 1] -= 1
                     if (m[emoji] ?? 0) <= 0 { m.removeValue(forKey: emoji) }
                     self.reactions[id] = m.isEmpty ? nil : m
+                case .typing(let room, let user, let started):
+                    guard self.isCurrentRoom(room) else { break }
+                    if started { self.typingUsers.insert(user) } else { self.typingUsers.remove(user) }
+                case .presence(let room, let user, let online):
+                    guard self.isCurrentRoom(room) else { break }
+                    self.presenceOnline[user] = online
+                case .memberAdded(let room, let user):
+                    guard self.isCurrentRoom(room) else { break }
+                    self.members.insert(user)
+                case .memberRemoved(let room, let user):
+                    guard self.isCurrentRoom(room) else { break }
+                    self.members.remove(user)
                 case .callStarted(let room, let callId):
                     guard self.isCurrentRoom(room) else { break }
                     // Banner only: in-call audio/video UI is not built; never fake an answered call.
@@ -348,8 +363,39 @@ public struct FailedDraft: Identifiable {
     public func forwardMessage(_ msg: MessageResponse, toRoomId: String, sessionToken: String, deviceId: String) async -> Bool {
         // Fresh id: a forward is a new message (unlike retry, which must reuse the id).
         guard let rt = try? await api.roomToken(token: sessionToken, roomId: toRoomId, deviceId: deviceId) else { return false }
+        // Re-init attachments in target room: ids are room-scoped, never copy verbatim.
+        var newIds: [String] = []
+        for aid in msg.attachment_ids {
+            guard let dl = try? await api.downloadAttachment(roomToken: currentToken, roomId: msg.room_id, attachmentId: aid),
+                  let u = URL(string: dl.download_url),
+                  let (data, _) = try? await URLSession.shared.data(from: u) else { continue }
+            let mime = (msg.body["mime"]?.value as? String) ?? "application/octet-stream"
+            let fn = (msg.body["filename"]?.value as? String) ?? aid
+            guard let initR = try? await api.initAttachment(roomToken: rt.access_token, roomId: toRoomId, filename: fn, mime: mime, byteSize: data.count),
+                  let putURL = URL(string: initR.upload_url) else { continue }
+            var req = URLRequest(url: putURL); req.httpMethod = "PUT"
+            let ( _, resp) = (try? await URLSession.shared.upload(for: req, from: data)) ?? (Data(), URLResponse())
+            guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else { continue }
+            if await api.completeAttachment(roomToken: rt.access_token, roomId: toRoomId, attachmentId: initR.attachment_id) {
+                newIds.append(initR.attachment_id)
+            }
+        }
         let body = msg.body
-        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachments: msg.attachment_ids)) != nil
+        let atts = newIds.isEmpty ? (msg.attachment_ids.isEmpty ? [] : []) : newIds
+        // Text-only forwards keep empty attachments; media forwards use re-minted ids.
+        return (try? await api.sendMessage(roomToken: rt.access_token, roomId: toRoomId, clientId: UUID().uuidString, kind: msg.kind, body: body, attachments: msg.kind == MessageKinds.text ? [] : atts)) != nil
+    }
+    public func editMessage(roomId: String, messageId: String, text: String) {
+        // Optimistic update with edited flag.
+        if let i = messages.firstIndex(where: { $0.id == messageId }) {
+            var b = messages[i].body; b["text"] = AnyCodable(text)
+            messages[i].body = b; messages[i].edited_at = "pending"
+        }
+        socket.editMessage(roomId: roomId, messageId: messageId, text: text)
+        Task {
+            if let updated = try? await api.editMessage(roomToken: currentToken, roomId: roomId, messageId: messageId, text: text),
+               let i = messages.firstIndex(where: { $0.id == messageId }) { messages[i] = updated }
+        }
     }
     // MARK: Selection
     public func toggleSelect(id: String) {
@@ -519,6 +565,58 @@ public struct FailedDraft: Identifiable {
         } catch {
             if gen == generation { results = [] }
         }
+    }
+}
+
+// MARK: - DraftStore (persist unsent text per room across switches)
+@MainActor public final class DraftStore: ObservableObject {
+    public static let shared = DraftStore()
+    @Published public var drafts: [String: String] = [:]
+    private let key = "chat_drafts_v1"
+    public init() {
+        if let d = UserDefaults.standard.data(forKey: key),
+           let m = try? JSONDecoder().decode([String: String].self, from: d) { drafts = m }
+    }
+    public func draft(for roomId: String) -> String { drafts[roomId] ?? "" }
+    public func set(_ text: String, for roomId: String) {
+        if text.isEmpty { drafts.removeValue(forKey: roomId) } else { drafts[roomId] = text }
+        UserDefaults.standard.set(try? JSONEncoder().encode(drafts), forKey: key)
+    }
+    public func clear(roomId: String) { set("", for: roomId) }
+}
+
+// MARK: - AppSettings (notifications + app lock + theme basics)
+@MainActor public final class AppSettings: ObservableObject {
+    public static let shared = AppSettings()
+    @Published public var notificationsEnabled: Bool {
+        didSet { UserDefaults.standard.set(notificationsEnabled, forKey: "opt_notifications") }
+    }
+    @Published public var appLockEnabled: Bool {
+        didSet { UserDefaults.standard.set(appLockEnabled, forKey: "opt_app_lock") }
+    }
+    @Published public var themeRaw: String {
+        didSet { UserDefaults.standard.set(themeRaw, forKey: "opt_theme") }
+    }
+    @Published public var mutedRooms: [String: Bool] = [:] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(mutedRooms), forKey: "muted_rooms_v1") }
+    }
+    @Published public var roomAliases: [String: String] = [:] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(roomAliases), forKey: "room_alias_v1") }
+    }
+    public init() {
+        notificationsEnabled = UserDefaults.standard.object(forKey: "opt_notifications") as? Bool ?? true
+        appLockEnabled = UserDefaults.standard.object(forKey: "opt_app_lock") as? Bool ?? false
+        themeRaw = UserDefaults.standard.string(forKey: "opt_theme") ?? "system"
+        if let d = UserDefaults.standard.data(forKey: "muted_rooms_v1"),
+           let m = try? JSONDecoder().decode([String: Bool].self, from: d) { mutedRooms = m }
+        if let d = UserDefaults.standard.data(forKey: "room_alias_v1"),
+           let m = try? JSONDecoder().decode([String: String].self, from: d) { roomAliases = m }
+    }
+    public func isMuted(roomId: String) -> Bool { mutedRooms[roomId] ?? false }
+    public func setMuted(_ m: Bool, roomId: String) { mutedRooms[roomId] = m }
+    public func alias(for roomId: String) -> String? { roomAliases[roomId] }
+    public func setAlias(_ a: String, roomId: String) {
+        if a.isEmpty { roomAliases.removeValue(forKey: roomId) } else { roomAliases[roomId] = a }
     }
 }
 
