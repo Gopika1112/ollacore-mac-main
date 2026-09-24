@@ -96,6 +96,11 @@ import SwiftUI
                 return
             }
             displayName = r.display_name; step = .authenticated
+            // BUG-04: register this install so server device list stays fresh.
+            let dev = session.deviceId
+            if let t = session.sessionToken { Task { _ = await api.registerDevice(token: t, pushToken: dev) } }
+            // BUG-01: hydrate full profile so display name never goes stale.
+            if let t = session.sessionToken { Task { if let p = try? await api.getProfile(token: t) { displayName = p.display_name } } }
         } catch { self.error = error.localizedDescription }
     }
     public func logout() async {
@@ -259,6 +264,13 @@ public struct FailedDraft: Identifiable {
                 case .typing(let room, let user, let started):
                     guard self.isCurrentRoom(room) else { break }
                     if started { self.typingUsers.insert(user) } else { self.typingUsers.remove(user) }
+                case .attachmentReady(let room, let aid):
+                    // BUG-08: prefetch presigned URL so taps open instantly.
+                    guard self.isCurrentRoom(room) else { break }
+                    Task { _ = await self.resolveAttachmentURL(attachmentId: aid, roomId: room, roomToken: self.currentToken) }
+                case .attachmentFailed(let room, _):
+                    guard self.isCurrentRoom(room) else { break }
+                    self.connectionError = "An attachment failed to process."
                 case .presence(let room, let user, let online):
                     guard self.isCurrentRoom(room) else { break }
                     self.presenceOnline[user] = online

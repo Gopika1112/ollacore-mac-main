@@ -184,10 +184,11 @@ struct HomeView: View {
                         HStack {
                             VStack(alignment: .leading) {
                                 let title = item.name ?? item.peer?.display_name ?? item.room_id
-                                Text((item.room_id == selectedRoom?.room_id ? "" : "") + title).bold().lineLimit(1)
+                                Text(title).bold().lineLimit(1)
                                 let preview = item.last_message?.preview ?? "No messages"
-                                let youPrefix = item.last_message?.sender_id != nil ? "" : ""
-                                Text("\(youPrefix)\(preview)").font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                // BUG-09: "You:" prefix when last message is ours.
+                                let isOwn = item.last_message?.sender_id != nil && item.last_message?.sender_id == auth.session.userId
+                                Text("\(isOwn ? "You: " : "")\(preview)").font(.caption).foregroundColor(.secondary).lineLimit(1)
                                 if let ts = item.last_message?.created_at { Text(ts).font(.caption2).foregroundColor(.secondary) }
                             }
                             Spacer()
@@ -293,6 +294,7 @@ struct ChatDetailView: View {
     @State private var showInfo = false
     @State private var editing: MessageResponse?
     @State private var editText = ""
+    @State private var wasTyping = false
     init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = []) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
     }
@@ -432,7 +434,15 @@ struct ChatDetailView: View {
                     .background(Color(nsColor: .textBackgroundColor))
                     .cornerRadius(8)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
-                    .onChange(of: draft) { _, v in drafts.set(v, for: room.room_id) }
+                    .onChange(of: draft) { _, v in
+                        drafts.set(v, for: room.room_id)
+                        // BUG-02: send typing frames (throttled by started/stopped transitions).
+                        let started = !v.isEmpty
+                        if started != wasTyping {
+                            wasTyping = started
+                            chat.socket.sendTyping(roomId: room.room_id, started: started)
+                        }
+                    }
                 Button("Send") {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return }
@@ -509,21 +519,24 @@ struct ChatDetailView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url,
-              let data = try? Data(contentsOf: url) else { return }
-        let ext = url.pathExtension.lowercased()
-        let mime: String
-        let kind: String
-        switch ext {
-        case "png": mime = "image/png"; kind = MessageKinds.image
-        case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
-        case "gif": mime = "image/gif"; kind = MessageKinds.image
-        case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
-        case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
-        case "pdf": mime = "application/pdf"; kind = MessageKinds.file
-        default: mime = "application/octet-stream"; kind = MessageKinds.file
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        // BUG-06: read file off the main thread.
+        Task.detached {
+            guard let data = try? Data(contentsOf: url) else { return }
+            let ext = url.pathExtension.lowercased()
+            let mime: String
+            let kind: String
+            switch ext {
+            case "png": mime = "image/png"; kind = MessageKinds.image
+            case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
+            case "gif": mime = "image/gif"; kind = MessageKinds.image
+            case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
+            case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
+            case "pdf": mime = "application/pdf"; kind = MessageKinds.file
+            default: mime = "application/octet-stream"; kind = MessageKinds.file
+            }
+            await MainActor.run { chat.uploadAndSend(roomId: room.room_id, data: data, filename: url.lastPathComponent, mime: mime, kind: kind) }
         }
-        chat.uploadAndSend(roomId: room.room_id, data: data, filename: url.lastPathComponent, mime: mime, kind: kind)
     }
 }
 
@@ -546,9 +559,11 @@ struct MessageBubble: View {
     private func openAttachment(savePanel: Bool = false) {
         guard !opening, let aid = message.attachment_ids.first else { return }
         opening = true
+        // BUG G-01: use pinned room/token via chat's current context (view passes roomId).
+        let rId = roomId
         Task {
             defer { opening = false }
-            guard let url = await chat.resolveAttachmentURL(attachmentId: aid),
+            guard let url = await chat.resolveAttachmentURL(attachmentId: aid, roomId: rId),
                   let (data, _) = try? await URLSession.shared.data(from: url) else { return }
             let dest: URL
             if savePanel {
@@ -614,7 +629,7 @@ struct MessageBubble: View {
                     }
                 } else {
                     Label("Image", systemImage: "photo").foregroundColor(.secondary)
-                        .task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "") }
+                        .task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "", roomId: roomId) }
                 }
                 if let c = caption { Text(c) }
             case MessageKinds.video:
@@ -641,6 +656,10 @@ struct MessageBubble: View {
                 else { Text(caption ?? "[\(message.kind)]") }
             }
             HStack(spacing: 6) {
+                // BUG-07: starred visual indicator.
+                if StarStore.shared.ids.contains(message.id) {
+                    Image(systemName: "star.fill").font(.caption2).foregroundColor(.yellow)
+                }
                 if let reacts = chat.reactions[message.id], !reacts.isEmpty {
                     ForEach(reacts.sorted(by: { $0.key < $1.key }), id: \.key) { emoji, count in
                         Text(count > 1 ? "\(emoji) \(count)" : emoji)
@@ -782,11 +801,18 @@ struct NewDMView: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("New direct message").font(.headline)
-            TextField("peer user id", text: $peer).textFieldStyle(.roundedBorder)
+            // BUG-03: accept phone OR user id; resolve phones via lookup.
+            TextField("phone or user id", text: $peer).textFieldStyle(.roundedBorder)
             Button("Create") {
                 Task {
                     guard let t = auth.session.sessionToken else { return }
-                    if (try? await OllacoreAPI.shared.openDirect(token: t, peerUserId: peer)) != nil {
+                    var uid = peer.trimmingCharacters(in: .whitespaces)
+                    if uid.hasPrefix("+") || uid.first?.isNumber == true {
+                        if let c = try? await OllacoreAPI.shared.lookupContacts(token: t, phones: [uid]), let first = c.first {
+                            uid = first.user_id
+                        } else { msg = "No contact found for \(uid)"; return }
+                    }
+                    if (try? await OllacoreAPI.shared.openDirect(token: t, peerUserId: uid)) != nil {
                         await home.refresh(token: t); dismiss()
                     } else { msg = "Failed to create DM" }
                 }
@@ -827,7 +853,16 @@ struct ProfileView: View {
         VStack(spacing: 12) {
             Text("Profile").font(.headline)
             TextField("Display name", text: $name).textFieldStyle(.roundedBorder)
-                .onAppear { name = auth.displayName ?? "" }
+                .onAppear {
+                    // BUG-01: fetch fresh profile on open so name never stale.
+                    name = auth.displayName ?? ""
+                    Task {
+                        guard let t = auth.session.sessionToken,
+                              let p = try? await OllacoreAPI.shared.getProfile(token: t) else { return }
+                        name = p.display_name ?? name; about = p.about ?? ""
+                        auth.displayName = p.display_name
+                    }
+                }
             TextField("About", text: $about).textFieldStyle(.roundedBorder)
             Button("Save") {
                 Task {
@@ -931,11 +966,13 @@ struct GlobalSearchView: View {
             Button("Search") {
                 Task {
                     guard let t = auth.session.sessionToken, !q.isEmpty else { return }
+                    // BUG-05: hoist SessionStore out of the loop.
+                    let dev = auth.session.deviceId
                     do {
                         let inbox = try await OllacoreAPI.shared.getInbox(token: t)
                         var total = 0
                         for room in inbox.prefix(10) {
-                            guard let rt = try? await OllacoreAPI.shared.roomToken(token: t, roomId: room.room_id, deviceId: SessionStore().deviceId) else { continue }
+                            guard let rt = try? await OllacoreAPI.shared.roomToken(token: t, roomId: room.room_id, deviceId: dev) else { continue }
                             total += (try? await OllacoreAPI.shared.searchMessages(roomToken: rt.access_token, roomId: room.room_id, q: q))?.count ?? 0
                         }
                         count = total; msg = total == 0 ? "No matches" : "Found \(total) message(s) across recent chats"
