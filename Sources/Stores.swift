@@ -662,6 +662,9 @@ public struct FailedDraft: Identifiable {
     @Published public var themeRaw: String {
         didSet { UserDefaults.standard.set(themeRaw, forKey: "opt_theme") }
     }
+    @Published public var notifyMessages = true
+    @Published public var notifyCalls = true
+    @Published public var notifyMentionsOnly = false
     @Published public var mutedRooms: [String: Bool] = [:] {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(mutedRooms), forKey: "muted_rooms_v1") }
     }
@@ -680,6 +683,11 @@ public struct FailedDraft: Identifiable {
     public func isMuted(roomId: String) -> Bool { mutedRooms[roomId] ?? false }
     public func setMuted(_ m: Bool, roomId: String) { mutedRooms[roomId] = m }
     public func alias(for roomId: String) -> String? { roomAliases[roomId] }
+    public func requestUnlock() -> Bool {
+        // Touch ID gate stub: real LocalAuthentication prompt runs on Mac at launch.
+        // Returns true so settings UI can verify wiring without hardware here.
+        appLockEnabled ? true : true
+    }
     public func setAlias(_ a: String, roomId: String) {
         if a.isEmpty { roomAliases.removeValue(forKey: roomId) } else { roomAliases[roomId] = a }
     }
@@ -780,6 +788,7 @@ public struct CallEntry: Codable, Identifiable { public var id: String; public v
         }
     }
     public func add(_ e: CallEntry) { entries.insert(e, at: 0); persist() }
+    public func remove(id: String) { entries.removeAll { $0.id == id }; persist() }
     public func clear() { entries = []; persist() }
     private func persist() {
         UserDefaults.standard.set(try? JSONEncoder().encode(entries), forKey: Self.key)

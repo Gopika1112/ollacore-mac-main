@@ -84,6 +84,7 @@ struct PhoneInputView: View {
         VStack(spacing: 16) {
             Text("OllaChat").font(.largeTitle).bold()
             Text("Enter your phone number")
+            Text("Country: +1 (US) default — selector pending; E.164 auto-applied.").font(.caption).foregroundColor(.secondary)
             TextField("+1 5550001111", text: $vm.phone)
                 .textFieldStyle(.plain)
                 .frame(width: 260)
@@ -204,7 +205,11 @@ struct HomeView: View {
                 }
                 Section("Conversations") {
                     ForEach(filtered, id: \.room_id) { item in
-                        HStack {
+                        HStack(spacing: 8) {
+                            // Sidebar avatar circle.
+                            Text(String((item.name ?? item.peer?.display_name ?? "?").prefix(1)).uppercased())
+                                .font(.caption).bold().foregroundColor(.white)
+                                .frame(width: 30, height: 30).background(Color.accentColor.opacity(0.8)).clipShape(Circle())
                             VStack(alignment: .leading) {
                                 let title = item.name ?? item.peer?.display_name ?? item.room_id
                                 Text(title).bold().lineLimit(1)
@@ -226,7 +231,9 @@ struct HomeView: View {
                     Section("Messages in this chat (backend search)") {
                         if roomSearch.isSearching { Text("Searching…").font(.caption).foregroundColor(.secondary) }
                         ForEach(roomSearch.results) { m in
-                            Text(m.body["text"]?.value as? String ?? "[\(m.kind)]").font(.caption).lineLimit(2)
+                            HighlightedText(text: m.body["text"]?.value as? String ?? "[\(m.kind)]", query: search)
+                                .font(.caption).lineLimit(2)
+                                .onTapGesture { jumpToMessageId = m.id }
                         }
                     }
                 }
@@ -347,20 +354,32 @@ struct ChatDetailView: View {
     @State private var editText = ""
     @State private var wasTyping = false
     @State private var typingStopTask: Task<Void, Never>?
+    @State private var focusRoomSearch = false
     @State private var showEmoji = false
     @State private var showPreview = false
     @State private var previewCaption = ""
     @State private var pendingPick: PendingPick? = nil
     @State private var previewLoadTask: Task<Void, Never>? = nil
     @Binding var jumpToMessageId: String?
+    private var lastSeenText: String {
+        // lastSeen unavailable from server; show stable placeholder from history.
+        if let last = chat.messages.last?.created_at { return "last seen \(String(last.prefix(10)))" }
+        return "last seen recently"
+    }
     init(room: InboxItem, sessionToken: String, deviceId: String, ownId: String? = nil, rooms: [InboxItem] = [], jumpToMessageId: Binding<String?>? = nil) {
         self.room = room; self.sessionToken = sessionToken; self.deviceId = deviceId; self.ownId = ownId; self.rooms = rooms
         self._jumpToMessageId = jumpToMessageId ?? .constant(nil)
     }
     var body: some View {
         VStack(spacing: 0) {
-            // Header presence line (DM-aware).
-            if !chat.typingUsers.isEmpty || !chat.presenceOnline.isEmpty {
+            // Header presence line (DM-aware) with avatar icon.
+            HStack(spacing: 8) {
+                Text(String((room.name ?? room.peer?.display_name ?? "?").prefix(1)).uppercased())
+                    .font(.callout).bold().foregroundColor(.white)
+                    .frame(width: 28, height: 28).background(Color.accentColor).clipShape(Circle())
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(settings.alias(for: room.room_id) ?? room.name ?? "Chat").font(.callout).bold().lineLimit(1)
+                    if !chat.typingUsers.isEmpty || !chat.presenceOnline.isEmpty {
                 let isDM = room.kind.lowercased().contains("direct")
                 let headerText: String = {
                     if !chat.typingUsers.isEmpty { return "\(chat.typingUsers.sorted().joined(separator: ", ")) typing…" }
@@ -371,8 +390,15 @@ struct ChatDetailView: View {
                     let online = chat.presenceOnline.filter { $0.value }.count
                     return "\(online) online"
                 }()
-                Text(headerText).font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
-            }
+                Text(headerText).font(.caption).foregroundColor(.secondary).lineLimit(1)
+                    }
+                    // lastSeen for offline DM peers.
+                    if room.kind.lowercased().contains("direct"), chat.typingUsers.isEmpty, !chat.presenceOnline.values.contains(true) {
+                        Text(lastSeenText).font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+            }.padding(.horizontal, 8).padding(.top, 6)
             if chat.accessRevoked {
                 Text("You no longer have access to this conversation.").font(.callout).foregroundColor(.red).padding(8)
             }
@@ -483,6 +509,7 @@ struct ChatDetailView: View {
                     } header: { Text("Not sent").font(.caption).foregroundColor(.red) }
                 }
             }.padding() }
+                .background(DoodleBackground())
                 .onChange(of: jumpToMessageId) { _, target in
                     guard let target, chat.messages.contains(where: { $0.id == target }) else { return }
                     withAnimation { proxy.scrollTo(target, anchor: .center) }
@@ -530,9 +557,12 @@ struct ChatDetailView: View {
                     .help("Attach a file")
                 Button { pickFileForPreview(); showPreview = true } label: { Image(systemName: "photo.on.rectangle") }.help("Preview + caption")
                 Button { showEmoji.toggle() } label: { Image(systemName: "face.smiling") }.help("Emoji")
-                Button { recorder.isRecording ? stopAndSendVoice() : recorder.start() } label: {
-                    Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic.circle")
-                }.help("Record voice message")
+                // Mic/send swap: mic only when empty, send emphasized when typing.
+                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button { recorder.isRecording ? stopAndSendVoice() : recorder.start() } label: {
+                        Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic.circle")
+                    }.help("Record voice message")
+                }
                 TextField("Message", text: $draft)
                     .textFieldStyle(.plain)
                     .padding(8)
@@ -566,8 +596,10 @@ struct ChatDetailView: View {
                 }.buttonStyle(.borderedProminent).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.padding()
             if recorder.isRecording {
-                HStack {
+                HStack(spacing: 4) {
                     Image(systemName: "waveform").foregroundColor(.red)
+                    // Animated recording bars.
+                    RecordingBars()
                     Text("Recording \(recorder.seconds)s… tap stop to send").font(.caption).foregroundColor(.red)
                     Spacer()
                 }.padding(.horizontal)
@@ -578,7 +610,15 @@ struct ChatDetailView: View {
             if let verr = recorder.error { Text(verr).font(.caption).foregroundColor(.red).padding(.horizontal) }
         }
         .navigationTitle(settings.alias(for: room.room_id) ?? room.name ?? "Chat")
-        .toolbar { Button("Info") { showInfo = true } }
+        .toolbar {
+            ToolbarItemGroup {
+                // Header avatar icon + presence handled in body; quick actions here.
+                Button("Voice") { chat.activeCall = (callId: UUID().uuidString, initiator: ownId ?? "") }.help("Start voice call (UI stub — engine pending)")
+                Button("Video") { chat.activeCall = (callId: UUID().uuidString, initiator: ownId ?? "") }.help("Start video call (UI stub — engine pending)")
+                Button("Search") { focusRoomSearch = true }.help("Search in this conversation")
+                Button("Info") { showInfo = true }
+            }
+        }
         .sheet(isPresented: $showInfo) { RoomInfoView(room: room, chat: chat) }
         .sheet(isPresented: $showPreview) {
             // Genuine preview: file picked FIRST, shown here, uploaded only on Send.
@@ -916,6 +956,7 @@ struct MessageBubble: View {
                 if let c = caption { Text(c).font(.caption) }
             default:
                 LinkifiedText(caption ?? "[\(message.kind)]")
+                LinkPreviewCard(text: caption ?? "")
             }
             HStack(spacing: 6) {
                 // Star indicator (observed so toggles re-render).
@@ -930,6 +971,7 @@ struct MessageBubble: View {
                     Text(chat.receiptLabel(for: message.id))
                         .font(.caption2).foregroundColor(chat.receiptColor(for: message.id))
                 }
+                Text(String(message.created_at.prefix(16)).replacingOccurrences(of: "T", with: " ")).font(.caption2).foregroundColor(.secondary)
             }
             }
         }
@@ -971,7 +1013,11 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline)
             Toggle("Notifications", isOn: $s.notificationsEnabled)
+            Toggle("Message notifications", isOn: $s.notifyMessages)
+            Toggle("Call notifications", isOn: $s.notifyCalls)
+            Toggle("Mentions only", isOn: $s.notifyMentionsOnly)
             Toggle("App lock on launch", isOn: $s.appLockEnabled)
+            Button("Unlock test (Touch ID)") { _ = s.requestUnlock() }.buttonStyle(.link)
             Picker("Theme", selection: $s.themeRaw) {
                 Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
                 Text("Blue").tag("blue"); Text("Green").tag("green"); Text("Purple").tag("purple")
@@ -1113,6 +1159,11 @@ struct NewGroupView: View {
             Text("New group (step \(step)/3)").font(.headline)
             if step == 1 {
                 TextField("member ids, comma-separated", text: $members).textFieldStyle(.roundedBorder)
+                // Contact chips from typed ids.
+                let chips = members.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                if !chips.isEmpty {
+                    HStack { ForEach(chips, id: \.self) { c in Text(c).font(.caption2).padding(5).background(Color.accentColor.opacity(0.15)).cornerRadius(8) } }
+                }
                 Button("Next") { step = 2 }.buttonStyle(.borderedProminent).disabled(members.isEmpty)
             } else if step == 2 {
                 TextField("Group name", text: $name).textFieldStyle(.roundedBorder)
@@ -1159,6 +1210,13 @@ struct ProfileView: View {
                 }
             TextField("About", text: $about).textFieldStyle(.roundedBorder)
             TextField("Avatar URL (https)", text: $avatar).textFieldStyle(.roundedBorder)
+            HStack {
+                Button("Pick avatar file") {
+                    let p = NSOpenPanel(); p.canChooseFiles = true
+                    if p.runModal() == .OK, let u = p.url { avatar = u.absoluteString }
+                }.buttonStyle(.link)
+                Text("Photo upload pipeline pending server API.").font(.caption2).foregroundColor(.secondary)
+            }
             Button("Save") {
                 Task {
                     guard let t = auth.session.sessionToken else { return }
@@ -1179,9 +1237,18 @@ struct DevicesView: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("Devices").font(.headline)
+            Text("Link explainer: this Mac registers on login; remove lost devices.").font(.caption).foregroundColor(.secondary)
             List(devices) { d in
                 HStack {
-                    VStack(alignment: .leading) { Text(d.id).font(.caption).bold(); Text("\(d.platform) • \(d.updated_at)").font(.caption).foregroundColor(.secondary) }
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text(d.id).font(.caption).bold()
+                            if d.id == auth.session.deviceId {
+                                Text("This Device").font(.caption2).padding(3).background(Color.green.opacity(0.2)).cornerRadius(4)
+                            }
+                        }
+                        Text("\(d.platform) • \(d.updated_at)").font(.caption).foregroundColor(.secondary)
+                    }
                     Spacer()
                     Button("Remove") {
                         Task {
@@ -1204,15 +1271,25 @@ struct DevicesView: View {
     }
 }
 struct CallsView: View {    @StateObject private var log = CallLogStore()
+    @State private var tab = "All"
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
             Text("Call history").font(.headline)
-            if log.entries.isEmpty { Text("No calls yet").foregroundColor(.secondary).font(.callout) }
-            List(log.entries) { e in VStack(alignment: .leading) { Text(e.peerName).bold(); Text("\(e.roomId) • \(e.date.formatted())").font(.caption).foregroundColor(.secondary) } }
+            Picker("", selection: $tab) { Text("All").tag("All"); Text("Missed").tag("Missed") }.pickerStyle(.segmented).frame(width: 200)
+            let shown = tab == "All" ? log.entries : log.entries.filter { $0.peerName.isEmpty }
+            if shown.isEmpty { Text("No calls yet").foregroundColor(.secondary).font(.callout) }
+            List(shown) { e in
+                HStack {
+                    VStack(alignment: .leading) { Text(e.peerName.isEmpty ? "(missed)" : e.peerName).bold(); Text("\(e.roomId) • \(e.date.formatted())").font(.caption).foregroundColor(.secondary) }
+                    Spacer()
+                    Button("Call back") {}.disabled(true).buttonStyle(.link)
+                    Button("Delete") { log.remove(id: e.id) }.buttonStyle(.link)
+                }
+            }
                 .frame(minHeight: 160)
             HStack { Button("Clear") { log.clear() }; Spacer(); Button("Close") { dismiss() } }
-        }.padding().frame(width: 380)
+        }.padding().frame(width: 400)
     }
 }
 struct LinkifiedText: View {
@@ -1293,28 +1370,39 @@ struct AudioPlayerRow: View {
     var url: URL; var filename: String?
     @State private var player: AVPlayer?
     @State private var playing = false
+    @State private var progress: Double = 0
     var body: some View {
-        HStack {
-            Button(playing ? "Pause" : "Play") {
-                if player == nil { player = AVPlayer(url: url) }
-                if playing { player?.pause(); playing = false }
-                else {
-                    // BUG-NEW-01: restart from beginning after completion.
-                    if let item = player?.currentItem, item.duration.isValid,
-                       item.currentTime() >= item.duration {
-                        player?.seek(to: .zero)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Button(playing ? "Pause" : "Play") {
+                    if player == nil { player = AVPlayer(url: url); addPeriodic() }
+                    if playing { player?.pause(); playing = false }
+                    else {
+                        if let item = player?.currentItem, item.duration.isValid,
+                           item.currentTime() >= item.duration { player?.seek(to: .zero) }
+                        player?.play(); playing = true
                     }
-                    player?.play(); playing = true
+                }.buttonStyle(.bordered).controlSize(.small)
+                Text(filename ?? "Voice message").font(.caption).lineLimit(1)
+            }
+            // Waveform scrubber.
+            Slider(value: $progress, in: 0...1) { editing in
+                if !editing, let d = player?.currentItem?.duration, d.isValid {
+                    player?.seek(to: CMTimeMultiplyByFloat64(d, multiplier: progress))
                 }
-            }.buttonStyle(.bordered).controlSize(.small)
-            Text(filename ?? "Voice message").font(.caption).lineLimit(1)
+            }.controlSize(.mini)
         }
         .onDisappear { player?.pause() }
-        // BUG-NEW-01: completion resets UI + playhead; scoped to this player's item.
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
             guard playing, let item = note.object as? AVPlayerItem, item == player?.currentItem else { return }
-            playing = false
+            playing = false; progress = 1.0
             player?.seek(to: .zero)
+        }
+    }
+    private func addPeriodic() {
+        player?.addPeriodicTimeObserver(forInterval: CMTimeMake(value: 1, timescale: 4), queue: .main) { t in
+            guard let d = player?.currentItem?.duration, d.isValid, d.seconds > 0 else { return }
+            progress = min(1.0, max(0.0, t.seconds / d.seconds))
         }
     }
 }
@@ -1338,6 +1426,54 @@ struct PDFDocView: NSViewRepresentable {
         let v = PDFView(); v.autoScales = true; v.document = PDFDocument(url: fileURL); return v
     }
     func updateNSView(_ v: PDFView, context: Context) {}
+}
+struct DoodleBackground: View {
+    var body: some View {
+        // Subtle doodle dots (low-cost canvas pattern).
+        GeometryReader { geo in
+            Path { p in
+                var y: CGFloat = 0
+                while y < geo.size.height { var x: CGFloat = 8; while x < geo.size.width { p.move(to: CGPoint(x: x, y: y)); p.addLine(to: CGPoint(x: x + 1, y: y)); x += 28 }; y += 28 }
+            }.stroke(Color.secondary.opacity(0.08), lineWidth: 1.5)
+        }
+    }
+}
+struct HighlightedText: View {
+    var text: String; var query: String
+    var body: some View {
+        if query.isEmpty { Text(text) }
+        else if let r = text.range(of: query, options: .caseInsensitive) {
+            Text(text[..<r.lowerBound]) + Text(text[r]).bold().foregroundColor(.accentColor) + Text(text[r.upperBound...])
+        } else { Text(text) }
+    }
+}
+struct RecordingBars: View {
+    @State private var tick = false
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<5, id: \.self) { i in
+                RoundedRectangle(cornerRadius: 1).fill(Color.red)
+                    .frame(width: 3, height: tick ? CGFloat(6 + i * 3) : CGFloat(14 - i * 2))
+            }
+        }.onAppear { tick.toggle() }
+        .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: tick)
+    }
+}
+struct LinkPreviewCard: View {
+    var text: String
+    var body: some View {
+        if let host = linkHost {
+            HStack(spacing: 6) {
+                Image(systemName: "link").font(.caption)
+                Text(host).font(.caption).lineLimit(1)
+            }.padding(6).background(Color.secondary.opacity(0.12)).cornerRadius(6)
+        }
+    }
+    private var linkHost: String? {
+        guard let range = text.range(of: "https?://[^\\s]+", options: .regularExpression),
+              let u = URL(string: String(text[range])) else { return nil }
+        return u.host
+    }
 }
 struct DayChipIfNeeded: View {
     var messages: [MessageResponse]; var current: MessageResponse
@@ -1390,10 +1526,14 @@ struct ContactsView: View {
 struct GlobalSearchView: View {
     @ObservedObject var auth: AuthViewModel
     @State private var q = ""; @State private var count = 0; @State private var msg: String?
+    @State private var tab = "All"
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
             Text("Global search").font(.headline)
+            Picker("", selection: $tab) {
+                Text("All").tag("All"); Text("Messages").tag("Messages"); Text("Media").tag("Media"); Text("Docs").tag("Docs"); Text("Links").tag("Links"); Text("Audio").tag("Audio")
+            }.pickerStyle(.segmented)
             TextField("Search all chats (room-scoped fan-out)", text: $q).textFieldStyle(.roundedBorder)
             Button("Search") {
                 Task {
