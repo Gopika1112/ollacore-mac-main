@@ -153,17 +153,35 @@ public final class OllacoreAPI {
         return try await exec(req("/directory/conversations/group", method: "POST", sessionToken: token, body: try enc(B(member_user_ids: members, name: name))))
     }
     // Tier1 stubs: group admin endpoints (server contract pending — safe no-op false until deployed).
+    // Wired to documented-style paths; return false on any non-2xx until backend confirms.
     @discardableResult
-    public func addGroupMember(token: String, groupId: String, userId: String) async -> Bool { false }
+    public func addGroupMember(token: String, groupId: String, userId: String) async -> Bool {
+        struct B: Encodable { var user_id: String }
+        guard let body = try? enc(B(user_id: userId)) else { return false }
+        return await fire(req(url: url(segments: ["directory", "conversations", "group", groupId, "members"]), method: "POST", sessionToken: token, body: body))
+    }
     @discardableResult
-    public func removeGroupMember(token: String, groupId: String, userId: String) async -> Bool { false }
+    public func removeGroupMember(token: String, groupId: String, userId: String) async -> Bool {
+        await fire(req(url: url(segments: ["directory", "conversations", "group", groupId, "members", userId]), method: "DELETE", sessionToken: token))
+    }
     @discardableResult
-    public func setGroupAdmin(token: String, groupId: String, userId: String, admin: Bool) async -> Bool { false }
+    public func setGroupAdmin(token: String, groupId: String, userId: String, admin: Bool) async -> Bool {
+        struct B: Encodable { var admin: Bool }
+        guard let body = try? enc(B(admin: admin)) else { return false }
+        return await fire(req(url: url(segments: ["directory", "conversations", "group", groupId, "members", userId]), method: "PATCH", sessionToken: token, body: body))
+    }
     @discardableResult
-    public func leaveGroup(token: String, groupId: String) async -> Bool { false }
-    // Tier1 stub: multipart endpoints pending server deployment.
-    public func initMultipart(roomToken: String, roomId: String, filename: String, mime: String, byteSize: Int) async throws -> AttachmentInitResponse {
-        throw ApiException(message: "Multipart not deployed.", code: "not_implemented", httpStatus: 501)
+    public func leaveGroup(token: String, groupId: String) async -> Bool {
+        await fire(req(url: url(segments: ["directory", "conversations", "group", groupId, "leave"]), method: "POST", sessionToken: token, body: Data("{}".utf8)))
+    }
+    // Multipart: chunked client; init/complete hit server when deployed (501 until then).
+    public func initMultipart(roomToken: String, roomId: String, filename: String, mime: String, byteSize: Int, partSize: Int = 8 * 1024 * 1024) async throws -> AttachmentInitResponse {
+        struct B: Encodable { var filename: String; var mime: String; var byte_size: Int; var part_size: Int }
+        return try await exec(req(url: url(segments: ["rooms", roomId, "attachments", "init-multipart"]), method: "POST", roomToken: roomToken, body: try enc(B(filename: filename, mime: mime, byte_size: byteSize, part_size: partSize))))
+    }
+    @discardableResult
+    public func completeMultipart(roomToken: String, roomId: String, attachmentId: String) async -> Bool {
+        await fire(req(url: url(segments: ["rooms", roomId, "attachments", attachmentId, "complete-multipart"]), method: "POST", roomToken: roomToken, body: Data()))
     }
     // Status/Stories API (backend pending — throws 501 until deployed; callers fall back to local).
     public struct StatusItem: Codable { public var id: String; public var text: String; public var created_at: String }

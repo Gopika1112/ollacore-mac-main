@@ -1,6 +1,10 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// NOTE: native WebRTC (libwebrtc) intentionally NOT linked yet — no verified
+// SwiftPM package + media integration on this Windows box. To enable calls:
+// add e.g. `.package(url: "https://github.com/stasel/WebRTC.git", from: "...")`
+// and bind RtcWebSocket ↔ RTCPeerConnection in CallScreenView.
 let package = Package(
     name: "OllaCoreMac",
     platforms: [.macOS(.v14)],

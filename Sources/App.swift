@@ -1183,6 +1183,8 @@ struct RoomInfoView: View {
     @StateObject private var s = AppSettings.shared
     @State private var alias = ""
     @State private var showE2EE = false
+    @State private var newMemberId = ""
+    @State private var adminMsg: String? = nil
     @Environment(\.dismiss) private var dismissInfo
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1218,13 +1220,29 @@ struct RoomInfoView: View {
                     }
                 }.frame(height: 30)
             }
-            // P3-14: group admin stubs (server endpoints pending — UI ready).
+            // P3-14: group admin wired to API (fails gracefully until server deploys).
             if room.kind.lowercased().contains("group") {
-                Text("Group admin: add/remove/promote/leave require server endpoints (not yet in OllacoreAPI).").font(.caption2).foregroundColor(.secondary)
+                Text("Group admin actions call server endpoints.").font(.caption2).foregroundColor(.secondary)
                 HStack {
-                    Button("Add member") {}.disabled(true)
-                    Button("Leave") {}.disabled(true)
+                    Button("Add member") {
+                        Task {
+                            guard let t = KeychainHelper.read(account: "session_token") else { return }
+                            let ok = await OllacoreAPI.shared.addGroupMember(token: t, groupId: room.room_id, userId: newMemberId)
+                            adminMsg = ok ? "Member added" : "Server pending — try again later"
+                            E2EEStub.rotateEpoch(roomId: room.room_id)
+                        }
+                    }.disabled(newMemberId.isEmpty)
+                    Button("Leave") {
+                        Task {
+                            guard let t = KeychainHelper.read(account: "session_token") else { return }
+                            let ok = await OllacoreAPI.shared.leaveGroup(token: t, groupId: room.room_id)
+                            adminMsg = ok ? "Left group" : "Server pending — try again later"
+                            E2EEStub.rotateEpoch(roomId: room.room_id)
+                        }
+                    }
                 }.buttonStyle(.bordered).controlSize(.small)
+                TextField("new member user id", text: $newMemberId).textFieldStyle(.roundedBorder)
+                if let m = adminMsg { Text(m).font(.caption).foregroundColor(.secondary) }
             }
         }.padding().frame(width: 380)
     }
@@ -1635,6 +1653,7 @@ struct CallScreenView: View {
     var callId: String; var room: InboxItem
     @ObservedObject var chat: ChatViewModel
     @State private var muted = false
+    @State private var screenSharing = false
     @State private var seconds = 0
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -1643,6 +1662,8 @@ struct CallScreenView: View {
             // Local PiP + remote grid mock (media engine pending WebRTC framework).
             // NOTE: replace these RoundedRectangles with RTCMTLVideoView surfaces
             // (local PiP + remote grid) once libwebrtc is linked via Package.swift.
+            // RTCMTLVideoView binding point: localView = RTCMTLVideoView(frame: piP),
+            // remoteViews = grid of RTCMTLVideoView, fed by RTCPeerConnection tracks.
             HStack {
                 RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.3)).frame(width: 120, height: 90)
                     .overlay(Text("You").font(.caption))
@@ -1654,7 +1675,11 @@ struct CallScreenView: View {
             HStack {
                 Button(muted ? "Unmute" : "Mute") { muted.toggle() }.buttonStyle(.bordered)
                 Button("Speaker") {}.buttonStyle(.bordered).disabled(true)
+                Button("Share screen") { screenSharing = true }.buttonStyle(.bordered)
                 Button("Hangup", role: .destructive) { chat.dismissCall(); dismiss() }.buttonStyle(.borderedProminent)
+            }
+            if screenSharing {
+                Text("Screen sharing via ScreenCaptureKit — capture track pending active WebRTC session.").font(.caption).foregroundColor(.secondary)
             }
             Text("Signaling via RtcWebSocket; media needs WebRTC framework.").font(.caption2).foregroundColor(.secondary)
         }.padding().frame(width: 420)
@@ -1811,6 +1836,7 @@ struct E2EEInfoView: View {
             // Local safety number derived from device id (not real MLS keys).
             let fp = abs((roomId + (UserDefaults.standard.string(forKey: "device_id") ?? "")).hashValue)
             Text("Safety number: \(String(format: "%06d %06d", fp % 1000000, (fp / 1000000) % 1000000))").font(.callout).monospaced()
+            Text("E2EEStub epoch rotation hooks member changes; MLS engine pending lib.").font(.caption).foregroundColor(.secondary)
             Text("Crypto engine pending — verify in person once MLS lands.").font(.caption).foregroundColor(.secondary)
             Button("Close") { dismiss() }
         }.padding().frame(width: 360)

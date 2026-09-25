@@ -511,6 +511,17 @@ public struct FailedDraft: Identifiable {
     /// init → PUT presigned → complete → send. Documented endpoints only; single-PUT
     /// (large multipart uploads remain future work and are refused client-side above 100MB).
     public func uploadAndSend(roomId: String, data: Data, filename: String, mime: String, kind: String, caption: String? = nil) {
+        // Multipart path for >100MB up to 500MB; single-PUT below.
+        if data.count > 100 * 1024 * 1024 {
+            guard data.count <= 500 * 1024 * 1024 else {
+                uploadState = .failed(filename: filename, message: "File exceeds the 500MB multipart limit.")
+                return
+            }
+            pendingUpload = (data, filename, mime, kind, caption)
+            uploadState = .uploading(filename: filename); uploadProgress = 0.05
+            Task { await self.runMultipartUpload(roomId: roomId) }
+            return
+        }
         guard data.count <= 100 * 1024 * 1024 else {
             uploadState = .failed(filename: filename, message: "File exceeds the 100MB single-upload limit.")
             return
@@ -576,6 +587,53 @@ public struct FailedDraft: Identifiable {
         } catch let e as URLError where e.code == .cancelled {
             uploadState = .idle // user-cancelled PUT: quiet, retryable via pendingUpload
         } catch {
+            uploadState = .failed(filename: p.filename, message: error.localizedDescription)
+        }
+    }
+    private func runMultipartUpload(roomId: String) async {
+        // Chunked PUT: split into 8MB parts, sequential presigned PUTs, then complete.
+        // Server 501 until deployed → surfaces as failed state with retry; uploadGen intact.
+        guard let p = pendingUpload else { uploadState = .idle; return }
+        uploadGen += 1
+        let gen = uploadGen
+        let token = currentToken, room = roomId
+        do {
+            let initR = try await api.initMultipart(roomToken: token, roomId: room, filename: p.filename, mime: p.mime, byteSize: p.data.count)
+            guard let putURL = URL(string: initR.upload_url), putURL.scheme?.lowercased() == "https" else {
+                throw ApiException(message: "Invalid upload URL.", code: "bad_upload_url", httpStatus: nil)
+            }
+            let part = 8 * 1024 * 1024
+            var offset = 0
+            while offset < p.data.count {
+                try Task.checkCancellation()
+                guard gen == uploadGen else { return }
+                let chunk = p.data[offset..<min(offset + part, p.data.count)]
+                var req = URLRequest(url: putURL)
+                req.httpMethod = "PUT"
+                req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                req.setValue("bytes \(offset)-\(offset + chunk.count - 1)/\(p.data.count)", forHTTPHeaderField: "Content-Range")
+                let (_, resp) = try await URLSession.shared.upload(for: req, from: Data(chunk))
+                guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else {
+                    throw ApiException(message: "Part upload failed.", code: "upload_failed", httpStatus: (resp as? HTTPURLResponse)?.statusCode)
+                }
+                offset += chunk.count
+                uploadProgress = 0.05 + 0.85 * Double(offset) / Double(p.data.count)
+            }
+            guard gen == uploadGen else { return }
+            guard await api.completeMultipart(roomToken: token, roomId: room, attachmentId: initR.attachment_id) else {
+                throw ApiException(message: "Multipart complete failed.", code: "complete_failed", httpStatus: nil)
+            }
+            guard gen == uploadGen else { return }
+            var body: [String: AnyCodable] = ["mime": AnyCodable(p.mime), "filename": AnyCodable(p.filename)]
+            if let c = p.caption { body["text"] = AnyCodable(c) }
+            _ = try await api.sendMessage(roomToken: token, roomId: room, clientId: UUID().uuidString, kind: kindForMime(p.mime, requested: p.kind), body: body, attachments: [initR.attachment_id])
+            guard gen == uploadGen else { return }
+            pendingUpload = nil; uploadProgress = 1.0; uploadState = .idle
+        } catch is CancellationError {
+            guard gen == uploadGen else { return }
+            uploadState = .idle
+        } catch {
+            guard gen == uploadGen else { return }
             uploadState = .failed(filename: p.filename, message: error.localizedDescription)
         }
     }
@@ -702,6 +760,16 @@ public struct FailedDraft: Identifiable {
     public func setAlias(_ a: String, roomId: String) {
         if a.isEmpty { roomAliases.removeValue(forKey: roomId) } else { roomAliases[roomId] = a }
     }
+}
+
+// MARK: - E2EE stub (ratchet engine pending real MLS lib)
+public enum E2EEStub {
+    public static func safetyNumber(roomId: String, deviceId: String) -> String {
+        let fp = abs((roomId + deviceId).hashValue)
+        return String(format: "%06d %06d", fp % 1000000, (fp / 1000000) % 1000000)
+    }
+    // Epoch rotation hook: called on member add/remove; no-op until MLS lands.
+    public static func rotateEpoch(roomId: String) {}
 }
 
 // MARK: - MimeValidator (magic-byte + blacklist; Tier1 security)
