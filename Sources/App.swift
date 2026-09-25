@@ -313,8 +313,12 @@ struct HomeView: View {
                 }
             }
             .sheet(isPresented: $showContacts) { ContactsView(auth: auth, home: home) }
-            .sheet(isPresented: $showGlobalSearch) { GlobalSearchView(auth: auth) }
-            .sheet(isPresented: $showUpdates) { VStack { Text("Updates").font(.headline); Text("Status placeholder — no stories yet.").foregroundColor(.secondary).font(.callout) }.padding().frame(width: 320) }
+            .sheet(isPresented: $showGlobalSearch) { GlobalSearchView(auth: auth, onJump: { roomId, msgId in
+                if let room = home.inbox.first(where: { $0.room_id == roomId }) {
+                    selectedRoom = room; jumpToMessageId = msgId
+                }
+            }) }
+            .sheet(isPresented: $showUpdates) { UpdatesView() }
             .sheet(isPresented: $showStarred) { StarredView(chatRooms: home.inbox, onJump: { roomId, msgId in
                 if let room = home.inbox.first(where: { $0.room_id == roomId }) {
                     selectedRoom = room
@@ -391,6 +395,7 @@ struct ChatDetailView: View {
     @State private var showPreview = false
     @State private var previewCaption = ""
     @State private var showAttachSheet = false
+    @State private var showCallScreen = false
     @State private var cameraNote: String? = nil
     @State private var pendingPick: PendingPick? = nil
     @State private var previewLoadTask: Task<Void, Never>? = nil
@@ -461,12 +466,14 @@ struct ChatDetailView: View {
             if let call = chat.activeCall {
                 HStack {
                     Image(systemName: "phone.fill").foregroundColor(.green)
-                    Text("Incoming call… (voice/video UI not built yet)").font(.callout)
+                    Text("Incoming call…").font(.callout)
                     Spacer()
+                    Button("Accept") { showCallScreen = true }.buttonStyle(.borderedProminent).controlSize(.small)
                     Button("Dismiss") { chat.dismissCall() }
                 }
                 .padding(8).background(Color.green.opacity(0.12))
                 .accessibilityIdentifier("call_banner_\(call.callId)")
+                .sheet(isPresented: $showCallScreen) { CallScreenView(callId: call.callId, room: room, chat: chat) }
             }
             if !chat.typingUsers.isEmpty {
                 Text("\(chat.typingUsers.sorted().joined(separator: ", ")) typing…").font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
@@ -673,23 +680,18 @@ struct ChatDetailView: View {
         .sheet(isPresented: $showAttachSheet) {
             VStack(spacing: 12) {
                 Text("Share").font(.headline)
-                HStack(spacing: 12) {
-                    Button("Location") {
-                        showAttachSheet = false
-                        chat.sendLocation(roomId: room.room_id, lat: 12.9716, lon: 77.5946)
-                    }.buttonStyle(.bordered)
-                    Button("Contact") {
-                        showAttachSheet = false
-                        chat.sendContact(roomId: room.room_id, name: "Demo Contact", phone: "+10000000000")
-                    }.buttonStyle(.bordered)
-                    Button("Camera") {
-                        showAttachSheet = false
-                        cameraNote = "Camera capture needs Mac camera permission — use Attach for now."
-                    }.buttonStyle(.bordered)
+                // Colorful tile grid.
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    AttachTile(icon: "photo", label: "Gallery") { showAttachSheet = false; pickAndSend() }
+                    AttachTile(icon: "doc", label: "Document") { showAttachSheet = false; pickAndSend() }
+                    AttachTile(icon: "waveform", label: "Audio") { showAttachSheet = false; pickAndSend() }
+                    AttachTile(icon: "mappin", label: "Location") { showAttachSheet = false; chat.sendLocation(roomId: room.room_id, lat: 12.9716, lon: 77.5946) }
+                    AttachTile(icon: "person.crop.circle", label: "Contact") { showAttachSheet = false; chat.sendContact(roomId: room.room_id, name: "Demo Contact", phone: "+10000000000") }
+                    AttachTile(icon: "camera", label: "Camera") { showAttachSheet = false; cameraNote = "Camera capture needs Mac camera permission — use Attach for now." }
                 }
                 if let n = cameraNote { Text(n).font(.caption).foregroundColor(.secondary) }
                 Button("Close") { showAttachSheet = false }
-            }.padding().frame(width: 360)
+            }.padding().frame(width: 380)
         }
         .sheet(isPresented: $showPreview) {
             // Genuine preview: file picked FIRST, shown here, uploaded only on Send.
@@ -1103,6 +1105,9 @@ struct SettingsView: View {
     @StateObject private var s = AppSettings.shared
     @State private var showPrivacy = false
     @State private var showStorage = false
+    @State private var showE2EE = false
+    @State private var pushMsg: String? = nil
+    private var authTokenForPush: String? { KeychainHelper.read(account: "session_token") }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline)
@@ -1110,11 +1115,20 @@ struct SettingsView: View {
             Toggle("Message notifications", isOn: $s.notifyMessages)
             Toggle("Call notifications", isOn: $s.notifyCalls)
             Toggle("Mentions only", isOn: $s.notifyMentionsOnly)
+            Button("Register for push (APNs)") {
+                NSApplication.shared.registerForRemoteNotifications()
+                Task {
+                    guard let t = authTokenForPush else { return }
+                    _ = await OllacoreAPI.shared.registerDevice(token: t, pushToken: "apns-pending")
+                    pushMsg = "Registered for remote notifications; token upload pending real APNs token."
+                }
+            }.buttonStyle(.link)
+            if let m = pushMsg { Text(m).font(.caption).foregroundColor(.secondary) }
             Toggle("App lock on launch", isOn: $s.appLockEnabled)
             Button("Unlock test (Touch ID)") { _ = s.requestUnlock() }.buttonStyle(.link)
             Button("Privacy & Security") { showPrivacy = true }.buttonStyle(.link)
             Button("Storage & Cache") { showStorage = true }.buttonStyle(.link)
-            .sheet(isPresented: $showPrivacy) { VStack { Text("Privacy & Security").font(.headline); Text("Disappearing messages TTL: server-gated (not yet available).").font(.caption).foregroundColor(.secondary); Text("E2EE: models decoded; crypto engine pending.").font(.caption).foregroundColor(.secondary) }.padding().frame(width: 340) }
+            .sheet(isPresented: $showPrivacy) { VStack { Text("Privacy & Security").font(.headline); Text("Disappearing messages TTL: server-gated (not yet available).").font(.caption).foregroundColor(.secondary); Text("E2EE: models decoded; crypto engine pending.").font(.caption).foregroundColor(.secondary); Picker("Disappearing", selection: $s.disappearingTTL) { Text("Off").tag("off"); Text("24h").tag("24h"); Text("7d").tag("7d"); Text("90d").tag("90d") }.pickerStyle(.segmented).frame(width: 280); Button("Encryption Info") { showE2EE = true }.buttonStyle(.link).sheet(isPresented: $showE2EE) { E2EEInfoView(roomId: "global") } }.padding().frame(width: 360) }
             .sheet(isPresented: $showStorage) { StorageView() }
             Picker("Theme", selection: $s.themeRaw) {
                 Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
@@ -1131,6 +1145,7 @@ struct RoomInfoView: View {
     @ObservedObject var chat: ChatViewModel
     @StateObject private var s = AppSettings.shared
     @State private var alias = ""
+    @State private var showE2EE = false
     @Environment(\.dismiss) private var dismissInfo
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1152,7 +1167,9 @@ struct RoomInfoView: View {
                 Button("Voice Call") { chat.activeCall = (callId: UUID().uuidString, initiator: "") }.disabled(true)
                 Button("Video Call") { chat.activeCall = (callId: UUID().uuidString, initiator: "") }.disabled(true)
                 Button("Search in Chat") { dismissInfo() }
+                Button("Encryption") { showE2EE = true }
             }.buttonStyle(.bordered).controlSize(.small)
+            .sheet(isPresented: $showE2EE) { E2EEInfoView(roomId: room.room_id) }
             // Media strip: recent image/file names.
             let recentMedia = chat.messages.filter { $0.kind != MessageKinds.text }.suffix(6)
             if !recentMedia.isEmpty {
@@ -1269,6 +1286,7 @@ struct NewGroupView: View {
     @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
     var knownPeers: [String] = []
     @State private var name = ""; @State private var desc = ""; @State private var members = ""; @State private var step = 1
+    @State private var groupIcon: String? = nil
     @State private var msg: String?
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -1294,6 +1312,11 @@ struct NewGroupView: View {
             } else if step == 2 {
                 TextField("Group name", text: $name).textFieldStyle(.roundedBorder)
                 TextField("Description (optional)", text: $desc).textFieldStyle(.roundedBorder)
+                Button("Pick group icon") {
+                    let p = NSOpenPanel(); p.canChooseFiles = true
+                    if p.runModal() == .OK, let u = p.url { groupIcon = u.lastPathComponent }
+                }.buttonStyle(.link)
+                if let g = groupIcon { Text("Icon: \(g) (upload pending server API)").font(.caption2).foregroundColor(.secondary) }
                 HStack { Button("Back") { step = 1 }; Button("Next") { step = 3 }.buttonStyle(.borderedProminent).disabled(name.isEmpty) }
             } else {
                 Text("Create \"\(name)\" with \(members)?").font(.callout).foregroundColor(.secondary)
@@ -1318,6 +1341,7 @@ struct NewGroupView: View {
 struct ProfileView: View {
     @ObservedObject var auth: AuthViewModel
     @State private var name = ""; @State private var about = ""; @State private var avatar = ""; @State private var msg: String?
+    @State private var avatarNote: String? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
@@ -1339,10 +1363,19 @@ struct ProfileView: View {
             HStack {
                 Button("Pick avatar file") {
                     let p = NSOpenPanel(); p.canChooseFiles = true
-                    if p.runModal() == .OK, let u = p.url { avatar = u.absoluteString }
+                    if p.runModal() == .OK, let u = p.url, let data = try? Data(contentsOf: u) {
+                        // Upload via attachment pipeline note: avatar endpoint pending — store temp + use https if already remote.
+                        if u.scheme == "https" { avatar = u.absoluteString }
+                        else {
+                            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(u.lastPathComponent)
+                            try? data.write(to: tmp)
+                            avatarNote = "Picked \(u.lastPathComponent) (\(data.count/1024)KB) — upload endpoint pending; paste HTTPS URL to save."
+                        }
+                    }
                 }.buttonStyle(.link)
                 Text("Photo upload pipeline pending server API.").font(.caption2).foregroundColor(.secondary)
             }
+            if let n = avatarNote { Text(n).font(.caption).foregroundColor(.secondary) }
             Button("Save") {
                 Task {
                     guard let t = auth.session.sessionToken else { return }
@@ -1404,6 +1437,7 @@ struct DevicesView: View {
 }
 struct CallsView: View {    @StateObject private var log = CallLogStore()
     @State private var tab = "All"
+    @State private var chatForCallback: String? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
@@ -1415,12 +1449,13 @@ struct CallsView: View {    @StateObject private var log = CallLogStore()
                 HStack {
                     VStack(alignment: .leading) { Text(e.peerName.isEmpty ? "(missed)" : e.peerName).bold(); Text("\(e.roomId) • \(e.date.formatted())").font(.caption).foregroundColor(.secondary) }
                     Spacer()
-                    Button("Call back") {}.disabled(true).buttonStyle(.link)
+                    Button("Call back") { chatForCallback = e.roomId }.buttonStyle(.link)
                     Button("Delete") { log.remove(id: e.id) }.buttonStyle(.link)
                 }
             }
                 .frame(minHeight: 160)
             HStack { Button("Clear") { log.clear() }; Spacer(); Button("Close") { dismiss() } }
+            if let r = chatForCallback { Text("Dial \(r) once WebRTC lands — RtcWebSocket ready.").font(.caption).foregroundColor(.secondary) }
         }.padding().frame(width: 400)
     }
 }
@@ -1486,6 +1521,36 @@ struct StarBadge: View {
 enum DockBadge {
     static func clear() { NSApp.dockTile.badgeLabel = "" }
 }
+struct CallScreenView: View {
+    var callId: String; var room: InboxItem
+    @ObservedObject var chat: ChatViewModel
+    @State private var muted = false
+    @State private var seconds = 0
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Call — \(room.name ?? room.room_id)").font(.headline)
+            // Local PiP + remote grid mock (media engine pending WebRTC framework).
+            HStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.3)).frame(width: 120, height: 90)
+                    .overlay(Text("You").font(.caption))
+                RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.25)).frame(width: 200, height: 140)
+                    .overlay(Text("Peer").font(.caption))
+            }
+            Text("\(seconds)s").font(.callout).foregroundColor(.secondary)
+                .onAppear { tick() }
+            HStack {
+                Button(muted ? "Unmute" : "Mute") { muted.toggle() }.buttonStyle(.bordered)
+                Button("Speaker") {}.buttonStyle(.bordered).disabled(true)
+                Button("Hangup", role: .destructive) { chat.dismissCall(); dismiss() }.buttonStyle(.borderedProminent)
+            }
+            Text("Signaling via RtcWebSocket; media needs WebRTC framework.").font(.caption2).foregroundColor(.secondary)
+        }.padding().frame(width: 420)
+    }
+    private func tick() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { seconds += 1; tick() }
+    }
+}
 struct PendingPick { var data: Data; var filename: String; var mime: String; var kind: String; var fileURL: URL?; var error: String? }
 struct CachedVideoPlayer: View {
     var url: URL
@@ -1517,12 +1582,19 @@ struct AudioPlayerRow: View {
                 }.buttonStyle(.bordered).controlSize(.small)
                 Text(filename ?? "Voice message").font(.caption).lineLimit(1)
             }
-            // Waveform scrubber.
             Slider(value: $progress, in: 0...1) { editing in
                 if !editing, let d = player?.currentItem?.duration, d.isValid {
                     player?.seek(to: CMTimeMultiplyByFloat64(d, multiplier: progress))
                 }
             }.controlSize(.mini)
+            // Waveform scrubber with stylized amplitude bars.
+            HStack(spacing: 2) {
+                ForEach(0..<24, id: \.self) { i in
+                    let h = CGFloat(4 + abs((filename ?? "x").hashValue >> (i % 8) + i) % 14)
+                    Rectangle().fill(progress * 24 > Double(i) ? Color.accentColor : Color.secondary.opacity(0.4))
+                        .frame(width: 3, height: h)
+                }
+            }.frame(height: 18)
         }
         .onDisappear { player?.pause() }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
@@ -1568,6 +1640,50 @@ struct DoodleBackground: View {
                 while y < geo.size.height { var x: CGFloat = 8; while x < geo.size.width { p.move(to: CGPoint(x: x, y: y)); p.addLine(to: CGPoint(x: x + 1, y: y)); x += 28 }; y += 28 }
             }.stroke(Color.secondary.opacity(0.08), lineWidth: 1.5)
         }
+    }
+}
+struct UpdatesView: View {
+    @State private var items = UserDefaults.standard.stringArray(forKey: "local_status_v1") ?? []
+    @State private var draft = ""
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Updates").font(.headline)
+            Text("Local stories (backend Status API pending).").font(.caption).foregroundColor(.secondary)
+            HStack {
+                TextField("New status", text: $draft).textFieldStyle(.roundedBorder)
+                Button("Post") {
+                    guard !draft.isEmpty else { return }
+                    items.insert(draft, at: 0); draft = ""
+                    UserDefaults.standard.set(items, forKey: "local_status_v1")
+                }.buttonStyle(.borderedProminent).disabled(draft.isEmpty)
+            }
+            List(items, id: \.self) { Text($0) }.frame(minHeight: 140)
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 360)
+    }
+}
+struct AttachTile: View {
+    var icon: String; var label: String; var action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack { Image(systemName: icon).font(.title2); Text(label).font(.caption) }
+                .frame(maxWidth: .infinity, minHeight: 64).background(Color.accentColor.opacity(0.12)).cornerRadius(10)
+        }.buttonStyle(.plain)
+    }
+}
+struct E2EEInfoView: View {
+    var roomId: String
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Encryption Info").font(.headline)
+            // Local safety number derived from device id (not real MLS keys).
+            let fp = abs((roomId + (UserDefaults.standard.string(forKey: "device_id") ?? "")).hashValue)
+            Text("Safety number: \(String(format: "%06d %06d", fp % 1000000, (fp / 1000000) % 1000000))").font(.callout).monospaced()
+            Text("Crypto engine pending — verify in person once MLS lands.").font(.caption).foregroundColor(.secondary)
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 360)
     }
 }
 struct StorageView: View {
@@ -1679,8 +1795,10 @@ struct ContactsView: View {
 }
 struct GlobalSearchView: View {
     @ObservedObject var auth: AuthViewModel
-    @State private var q = ""; @State private var count = 0; @State private var msg: String?
+    var onJump: ((String, String) -> Void)? = nil
+    @State private var q = ""; @State private var msg: String?
     @State private var tab = "All"
+    @State private var hits: [(room: InboxItem, m: MessageResponse)] = []
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
@@ -1688,27 +1806,46 @@ struct GlobalSearchView: View {
             Picker("", selection: $tab) {
                 Text("All").tag("All"); Text("Messages").tag("Messages"); Text("Media").tag("Media"); Text("Docs").tag("Docs"); Text("Links").tag("Links"); Text("Audio").tag("Audio")
             }.pickerStyle(.segmented)
-            Text("Tab filters results by kind (Media=images+video, Docs=files, Links=http text, Audio=audio).").font(.caption2).foregroundColor(.secondary)
             TextField("Search all chats (room-scoped fan-out)", text: $q).textFieldStyle(.roundedBorder)
             Button("Search") {
                 Task {
                     guard let t = auth.session.sessionToken, !q.isEmpty else { return }
-                    // BUG-05: hoist SessionStore out of the loop.
                     let dev = auth.session.deviceId
                     do {
                         let inbox = try await OllacoreAPI.shared.getInbox(token: t)
-                        var total = 0
+                        var out: [(InboxItem, MessageResponse)] = []
                         for room in inbox.prefix(10) {
                             guard let rt = try? await OllacoreAPI.shared.roomToken(token: t, roomId: room.room_id, deviceId: dev) else { continue }
-                            total += (try? await OllacoreAPI.shared.searchMessages(roomToken: rt.access_token, roomId: room.room_id, q: q))?.count ?? 0
+                            let found = (try? await OllacoreAPI.shared.searchMessages(roomToken: rt.access_token, roomId: room.room_id, q: q)) ?? []
+                            for m in found where matchTab(m) { out.append((room, m)) }
                         }
-                        count = total; msg = total == 0 ? "No matches" : "Found \(total) message(s) across recent chats"
+                        hits = out
+                        msg = out.isEmpty ? "No matches" : "Found \(out.count) match(es)"
                     } catch { msg = error.localizedDescription }
                 }
             }.buttonStyle(.borderedProminent).disabled(q.isEmpty)
+            List(hits, id: \.m.id) { (room, m) in
+                Button {
+                    onJump?(room.room_id, m.id); dismiss()
+                } label: {
+                    VStack(alignment: .leading) {
+                        HighlightedText(text: m.body["text"]?.value as? String ?? "[\(m.kind)]", query: q).font(.callout).lineLimit(2)
+                        Text("\(room.name ?? room.room_id) • \(m.kind)").font(.caption2).foregroundColor(.secondary)
+                    }
+                }.buttonStyle(.plain)
+            }.frame(minHeight: 140)
             if let msg { Text(msg).font(.caption).foregroundColor(.secondary) }
-            let _ = count
             Button("Close") { dismiss() }
-        }.padding().frame(width: 380)
+        }.padding().frame(width: 420)
+    }
+    private func matchTab(_ m: MessageResponse) -> Bool {
+        switch tab {
+        case "Messages": return m.kind == "text"
+        case "Media": return m.kind == "image" || m.kind == "video"
+        case "Docs": return m.kind == "file"
+        case "Links": return (m.body["text"]?.value as? String ?? "").contains("http")
+        case "Audio": return m.kind == "audio"
+        default: return true
+        }
     }
 }

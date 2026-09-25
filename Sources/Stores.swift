@@ -675,6 +675,7 @@ public struct FailedDraft: Identifiable {
     @Published public var notifyMessages = true
     @Published public var notifyCalls = true
     @Published public var notifyMentionsOnly = false
+    @Published public var disappearingTTL = "off"
     @Published public var mutedRooms: [String: Bool] = [:] {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(mutedRooms), forKey: "muted_rooms_v1") }
     }
