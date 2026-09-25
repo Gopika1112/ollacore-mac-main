@@ -183,8 +183,7 @@ public final class OllacoreAPI {
     public func completeMultipart(roomToken: String, roomId: String, attachmentId: String) async -> Bool {
         await fire(req(url: url(segments: ["rooms", roomId, "attachments", attachmentId, "complete-multipart"]), method: "POST", roomToken: roomToken, body: Data()))
     }
-    // Status/Stories API (backend pending — throws 501 until deployed; callers fall back to local).
-    public struct StatusItem: Codable { public var id: String; public var text: String; public var created_at: String }
+    // Status/Stories API (backend pending — throws 501 until deployed; callers fall back to local).    public struct StatusItem: Codable { public var id: String; public var text: String; public var created_at: String }
     public func getStatus(token: String) async throws -> [StatusItem] {
         struct R: Decodable { var items: [StatusItem] }
         let r: R = try await exec(req("/directory/status", method: "GET", sessionToken: token))
@@ -280,5 +279,22 @@ public final class OllacoreAPI {
     @discardableResult
     public func deleteDevice(token: String, deviceId: String) async -> Bool {
         await fire(req(url: url(segments: ["directory", "devices", deviceId]), method: "DELETE", sessionToken: token))
+    }
+    // Avatar/group-icon binary upload (server contract: POST /v1/directory/avatar -> {url}).
+    // Returns HTTPS URL on success, nil until backend deploys (callers keep local path).
+    public func uploadAvatar(token: String, data: Data, filename: String, mime: String) async -> String? {
+        struct R: Decodable { var url: String?; var avatar_url: String? }
+        var r = URLRequest(url: url(path: "directory/avatar"))
+        r.httpMethod = "POST"
+        r.setValue(mime, forHTTPHeaderField: "Content-Type")
+        r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        r.httpBody = data
+        _ = filename
+        guard let (d, resp) = try? await URLSession.shared.data(for: r),
+              let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let decoded = try? JSONDecoder().decode(R.self, from: d),
+              let u = decoded.url ?? decoded.avatar_url,
+              u.lowercased().hasPrefix("https://") else { return nil }
+        return u
     }
 }

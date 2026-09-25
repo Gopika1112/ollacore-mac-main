@@ -1229,7 +1229,7 @@ struct RoomInfoView: View {
                             guard let t = KeychainHelper.read(account: "session_token") else { return }
                             let ok = await OllacoreAPI.shared.addGroupMember(token: t, groupId: room.room_id, userId: newMemberId)
                             adminMsg = ok ? "Member added" : "Server pending — try again later"
-                            E2EEStub.rotateEpoch(roomId: room.room_id)
+                            if ok { E2EEStub.rotateEpoch(roomId: room.room_id) }
                         }
                     }.disabled(newMemberId.isEmpty)
                     Button("Leave") {
@@ -1237,7 +1237,7 @@ struct RoomInfoView: View {
                             guard let t = KeychainHelper.read(account: "session_token") else { return }
                             let ok = await OllacoreAPI.shared.leaveGroup(token: t, groupId: room.room_id)
                             adminMsg = ok ? "Left group" : "Server pending — try again later"
-                            E2EEStub.rotateEpoch(roomId: room.room_id)
+                            if ok { E2EEStub.rotateEpoch(roomId: room.room_id) }
                         }
                     }
                 }.buttonStyle(.bordered).controlSize(.small)
@@ -1419,12 +1419,19 @@ struct ProfileView: View {
                 Button("Pick avatar file") {
                     let p = NSOpenPanel(); p.canChooseFiles = true
                     if p.runModal() == .OK, let u = p.url, let data = try? Data(contentsOf: u) {
-                        // Upload via attachment pipeline note: avatar endpoint pending — store temp + use https if already remote.
                         if u.scheme == "https" { avatar = u.absoluteString }
                         else {
                             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(u.lastPathComponent)
                             try? data.write(to: tmp)
-                            avatarNote = "Picked \(u.lastPathComponent) (\(data.count/1024)KB) — upload endpoint pending; paste HTTPS URL to save."
+                            avatarNote = "Uploading \(u.lastPathComponent)…"
+                            Task {
+                                guard let t = KeychainHelper.read(account: "session_token"),
+                                      let remote = await OllacoreAPI.shared.uploadAvatar(token: t, data: data, filename: u.lastPathComponent, mime: "image/jpeg") else {
+                                    avatarNote = "Picked \(u.lastPathComponent) (\(data.count/1024)KB) — upload endpoint pending; paste HTTPS URL to save."
+                                    return
+                                }
+                                avatar = remote; avatarNote = "Uploaded."
+                            }
                         }
                     }
                 }.buttonStyle(.link)

@@ -599,7 +599,14 @@ public struct FailedDraft: Identifiable {
         let token = currentToken, room = roomId
         do {
             let initR = try await api.initMultipart(roomToken: token, roomId: room, filename: p.filename, mime: p.mime, byteSize: p.data.count)
-            guard let putURL = URL(string: initR.upload_url), putURL.scheme?.lowercased() == "https" else {
+            // Allow http only for localhost dev; https required otherwise (S-05).
+            let scheme = URL(string: initR.upload_url)?.scheme?.lowercased() ?? ""
+            let host = URL(string: initR.upload_url)?.host?.lowercased() ?? ""
+            let localHost = host == "localhost" || host == "127.0.0.1"
+            guard scheme == "https" || (scheme == "http" && localHost) else {
+                throw ApiException(message: "Invalid upload URL.", code: "bad_upload_url", httpStatus: nil)
+            }
+            guard let putURL = URL(string: initR.upload_url) else {
                 throw ApiException(message: "Invalid upload URL.", code: "bad_upload_url", httpStatus: nil)
             }
             let part = 8 * 1024 * 1024
