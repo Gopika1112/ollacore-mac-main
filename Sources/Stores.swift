@@ -350,6 +350,16 @@ public struct FailedDraft: Identifiable {
         replyTo = nil
         return reqId
     }
+    public func sendLocation(roomId: String, lat: Double, lon: Double) {
+        let reqId = socket.sendLocation(roomId: roomId, lat: lat, lon: lon)
+        pendingFrames[reqId] = (UUID().uuidString, "\(lat),\(lon)")
+        sendingCount = pendingFrames.count
+    }
+    public func sendContact(roomId: String, name: String, phone: String) {
+        let reqId = socket.sendContact(roomId: roomId, name: name, phone: phone)
+        pendingFrames[reqId] = (UUID().uuidString, name)
+        sendingCount = pendingFrames.count
+    }
     /// Retry reuses the same client_message_id for idempotency.
     @discardableResult
     public func retry(roomId: String, text: String, clientId: String) -> String {
@@ -690,6 +700,26 @@ public struct FailedDraft: Identifiable {
     }
     public func setAlias(_ a: String, roomId: String) {
         if a.isEmpty { roomAliases.removeValue(forKey: roomId) } else { roomAliases[roomId] = a }
+    }
+}
+
+// MARK: - MimeValidator (magic-byte + blacklist; Tier1 security)
+public enum MimeValidator {
+    static let blocked: Set<String> = ["exe", "bat", "cmd", "sh", "bin", "app", "msi", "com", "scr", "ps1", "vbs", "jar", "dll", "sys", "apk", "dmg", "pkg", "run"]
+    public static func validate(filename: String, data: Data) -> (mime: String, kind: String, blocked: Bool)? {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        if blocked.contains(ext) { return (ext, "file", true) }
+        // Double-extension attack: flag foo.pdf.exe etc.
+        let parts = filename.lowercased().split(separator: ".")
+        if parts.count > 2 && blocked.contains(String(parts.last ?? "")) { return (ext, "file", true) }
+        // Magic bytes (first bytes) for common types.
+        let b: [UInt8] = Array(data.prefix(12))
+        if b.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return ("image/png", MessageKinds.image, false) }
+        if b.starts(with: [0xFF, 0xD8, 0xFF]) { return ("image/jpeg", MessageKinds.image, false) }
+        if b.starts(with: [0x47, 0x49, 0x46]) { return ("image/gif", MessageKinds.image, false) }
+        if b.starts(with: [0x25, 0x50, 0x44, 0x46]) { return ("application/pdf", MessageKinds.file, false) }
+        if b.starts(with: [0x4D, 0x5A]) { return ("application/octet-stream", "file", true) } // MZ executable
+        return nil // fall back to extension mapping
     }
 }
 

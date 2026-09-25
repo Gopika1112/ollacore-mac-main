@@ -178,6 +178,12 @@ public final class ChatWebSocket: NSObject, URLSessionWebSocketDelegate {
     public func sendTyping(roomId: String, started: Bool) {
         send(type: started ? "typing.started" : "typing.stopped", roomId: roomId, payload: [:])
     }
+    public func sendLocation(roomId: String, lat: Double, lon: Double) -> String {
+        send(type: "message.send", roomId: roomId, payload: ["client_message_id": UUID().uuidString, "kind": "location", "body": ["lat": lat, "lon": lon], "attachment_ids": []])
+    }
+    public func sendContact(roomId: String, name: String, phone: String) -> String {
+        send(type: "message.send", roomId: roomId, payload: ["client_message_id": UUID().uuidString, "kind": "contact", "body": ["name": name, "phone": phone], "attachment_ids": []])
+    }
     public func disconnect() { flushSeq(); cancelReconnect(); pingTimer?.invalidate(); isConnected = false; task?.cancel(with: .normalClosure, reason: nil); onEvent?(.disconnected(code: 1000)) }
     private var reconnectWork: DispatchWorkItem?
     private var reconnectAttempts = 0

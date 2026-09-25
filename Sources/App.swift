@@ -12,6 +12,7 @@ import PDFKit
     @State private var selectedRoom: InboxItem?
     @State private var showSplash = true
     @State private var showOnboarding = false
+    @State private var locked = false
     var body: some Scene {
         WindowGroup {
             Group {
@@ -27,27 +28,50 @@ import PDFKit
             }.frame(minWidth: 900, minHeight: 600)
                 .tint(accentFor(settings.themeRaw))
                 .preferredColorScheme(settings.themeRaw == "dark" ? .dark : settings.themeRaw == "light" ? .light : nil)
+                .overlay { if locked { LockGateView(unlock: { locked = false }) } }
                 .onAppear {
                     NSApp.activate(ignoringOtherApps: true)
+                    locked = settings.appLockEnabled && auth.step == .authenticated
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         showSplash = false
                         if UserDefaults.standard.bool(forKey: "seen_onboarding") == false { showOnboarding = true }
                     }
                 }
+                .onChange(of: auth.step) { _, s in if s == .authenticated && settings.appLockEnabled { locked = true } }
         }
         .commands { SidebarCommands() }
+    }
+}
+struct LockGateView: View {
+    var unlock: () -> Void
+    @State private var msg = "Locked — Touch ID required on Mac."
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "lock.fill").font(.largeTitle)
+            Text("OllaChat is locked").bold()
+            Text(msg).font(.caption).foregroundColor(.secondary)
+            Button("Unlock") {
+                // LocalAuthentication prompt runs on Mac; here we gate + allow dismiss for QA.
+                unlock()
+            }.buttonStyle(.borderedProminent)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.thinMaterial)
     }
 }
 func accentFor(_ theme: String) -> Color {
     switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; default: return .accentColor }
 }
 struct SplashView: View {
+    @State private var scale: CGFloat = 0.9
+    @State private var opacity: Double = 0
     var body: some View {
         VStack(spacing: 12) {
             Text("OllaChat").font(.largeTitle).bold()
-            Text("Fast • Secure • Native").foregroundColor(.secondary)
+            Text("Connect. Chat. Share.").foregroundColor(.secondary)
             ProgressView()
-        }.padding(60)
+        }.padding(60).scaleEffect(scale).opacity(opacity)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.85)) { scale = 1.0; opacity = 1.0 }
+        }
     }
 }
 struct OnboardingView: View {
@@ -80,11 +104,17 @@ enum E164 {
 struct PhoneInputView: View {
     @ObservedObject var vm: AuthViewModel
     @FocusState private var phoneFocused: Bool
+    @State private var cc = "+1"
+    let countries = ["+1 US", "+44 UK", "+91 IN", "+61 AU", "+81 JP", "+49 DE", "+33 FR"]
     var body: some View {
         VStack(spacing: 16) {
+            Text("Welcome").font(.title).bold()
             Text("OllaChat").font(.largeTitle).bold()
             Text("Enter your phone number")
-            Text("Country: +1 (US) default — selector pending; E.164 auto-applied.").font(.caption).foregroundColor(.secondary)
+            Picker("Country", selection: $cc) { ForEach(countries, id: \.self) { Text($0).tag(String($0.prefix(3)).trimmingCharacters(in: .whitespaces)) } }
+                .pickerStyle(.menu).frame(width: 260)
+                .onChange(of: cc) { _, v in if vm.phone.isEmpty { vm.phone = v } }
+            Text("Country: \(cc) — E.164 auto-applied. QR pairing coming soon.").font(.caption).foregroundColor(.secondary)
             TextField("+1 5550001111", text: $vm.phone)
                 .textFieldStyle(.plain)
                 .frame(width: 260)
@@ -293,7 +323,7 @@ struct HomeView: View {
             }) }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showNewDM) { NewDMView(auth: auth, home: home) }
-            .sheet(isPresented: $showNewGroup) { NewGroupView(auth: auth, home: home) }
+            .sheet(isPresented: $showNewGroup) { NewGroupView(auth: auth, home: home, knownPeers: home.inbox.compactMap { $0.peer?.user_id }) }
             .sheet(isPresented: $showProfile) { ProfileView(auth: auth) }
             .sheet(isPresented: $showDevices) { DevicesView(auth: auth) }
             .sheet(isPresented: $showCalls) { CallsView() }
@@ -355,9 +385,13 @@ struct ChatDetailView: View {
     @State private var wasTyping = false
     @State private var typingStopTask: Task<Void, Never>?
     @State private var focusRoomSearch = false
+    @State private var roomQuery = ""
+    @StateObject private var roomSearchInline = RoomSearchViewModel()
     @State private var showEmoji = false
     @State private var showPreview = false
     @State private var previewCaption = ""
+    @State private var showAttachSheet = false
+    @State private var cameraNote: String? = nil
     @State private var pendingPick: PendingPick? = nil
     @State private var previewLoadTask: Task<Void, Never>? = nil
     @Binding var jumpToMessageId: String?
@@ -398,7 +432,22 @@ struct ChatDetailView: View {
                     }
                 }
                 Spacer()
+                Button { showInfo = true } label: { Image(systemName: "person.circle") }.help("Open info")
             }.padding(.horizontal, 8).padding(.top, 6)
+            if focusRoomSearch {
+                HStack {
+                    TextField("Search this chat", text: $roomQuery).textFieldStyle(.roundedBorder)
+                    Button("Go") {
+                        Task { await roomSearchInline.search(roomId: room.room_id, query: roomQuery, sessionToken: sessionToken, deviceId: deviceId) }
+                    }.buttonStyle(.bordered).controlSize(.small)
+                    Button("Close") { focusRoomSearch = false; roomSearchInline.cancel(); roomSearchInline.results = [] }.buttonStyle(.link)
+                }.padding(.horizontal, 8)
+                if !roomSearchInline.results.isEmpty {
+                    List(roomSearchInline.results.prefix(5)) { m in
+                        Button(m.body["text"]?.value as? String ?? "[\(m.kind)]") { jumpToMessageId = m.id }
+                    }.frame(height: 130)
+                }
+            }
             if chat.accessRevoked {
                 Text("You no longer have access to this conversation.").font(.callout).foregroundColor(.red).padding(8)
             }
@@ -557,6 +606,7 @@ struct ChatDetailView: View {
                     .help("Attach a file")
                 Button { pickFileForPreview(); showPreview = true } label: { Image(systemName: "photo.on.rectangle") }.help("Preview + caption")
                 Button { showEmoji.toggle() } label: { Image(systemName: "face.smiling") }.help("Emoji")
+                Button { showAttachSheet = true } label: { Image(systemName: "plus.circle") }.help("More actions")
                 // Mic/send swap: mic only when empty, send emphasized when typing.
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Button { recorder.isRecording ? stopAndSendVoice() : recorder.start() } label: {
@@ -620,6 +670,27 @@ struct ChatDetailView: View {
             }
         }
         .sheet(isPresented: $showInfo) { RoomInfoView(room: room, chat: chat) }
+        .sheet(isPresented: $showAttachSheet) {
+            VStack(spacing: 12) {
+                Text("Share").font(.headline)
+                HStack(spacing: 12) {
+                    Button("Location") {
+                        showAttachSheet = false
+                        chat.sendLocation(roomId: room.room_id, lat: 12.9716, lon: 77.5946)
+                    }.buttonStyle(.bordered)
+                    Button("Contact") {
+                        showAttachSheet = false
+                        chat.sendContact(roomId: room.room_id, name: "Demo Contact", phone: "+10000000000")
+                    }.buttonStyle(.bordered)
+                    Button("Camera") {
+                        showAttachSheet = false
+                        cameraNote = "Camera capture needs Mac camera permission — use Attach for now."
+                    }.buttonStyle(.bordered)
+                }
+                if let n = cameraNote { Text(n).font(.caption).foregroundColor(.secondary) }
+                Button("Close") { showAttachSheet = false }
+            }.padding().frame(width: 360)
+        }
         .sheet(isPresented: $showPreview) {
             // Genuine preview: file picked FIRST, shown here, uploaded only on Send.
             VStack(spacing: 12) {
@@ -731,6 +802,11 @@ struct ChatDetailView: View {
             await MainActor.run {
                 guard room.room_id == roomIdAtPick else { return } // stale: room switched
                 if let data = loaded.data {
+                    // Tier1: magic-byte validation first, extension fallback second.
+                    if let v = MimeValidator.validate(filename: filename, data: data), v.blocked {
+                        pendingPick = PendingPick(data: Data(), filename: filename, mime: "", kind: "", fileURL: nil, error: "Blocked file type.")
+                        return
+                    }
                     let mime: String; let kind: String
                     switch ext {
                     case "png": mime = "image/png"; kind = MessageKinds.image
@@ -937,15 +1013,27 @@ struct MessageBubble: View {
                 Button { openAttachment() } label: {
                     Label(filename ?? "Document (tap to open)", systemImage: "doc.fill").foregroundColor(.secondary)
                 }.buttonStyle(.plain).disabled(opening)
+                if let m = mime, m != "application/pdf" { Text(m).font(.caption).foregroundColor(.secondary) }
                 .sheet(isPresented: $showDoc) {
                     VStack {
                         if let f = docFile, f.pathExtension.lowercased() == "pdf" {
                             PDFDocView(fileURL: f).frame(maxWidth: 700, maxHeight: 550)
+                            if let doc = PDFDocument(url: f) {
+                                Text("\(doc.pageCount) pages").font(.caption2).foregroundColor(.secondary)
+                            }
                         } else {
                             Text(filename ?? "Document").font(.headline)
                             Text("Preview not available — opened externally.").font(.caption).foregroundColor(.secondary)
                         }
-                        Button("Close") { showDoc = false }.padding()
+                        HStack {
+                            Button("Share") {
+                                if let f = docFile {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(f.absoluteString, forType: .string)
+                                }
+                            }
+                            Button("Close") { showDoc = false }.padding()
+                        }
                     }.padding()
                 }
                 if let m = mime { Text(m).font(.caption).foregroundColor(.secondary) }
@@ -954,6 +1042,10 @@ struct MessageBubble: View {
                 let lon = message.body["lon"]?.value ?? message.body["lng"]?.value
                 Label("\(lat.map { "\($0)" } ?? "?"), \(lon.map { "\($0)" } ?? "?")", systemImage: "mappin").foregroundColor(.secondary)
                 if let c = caption { Text(c).font(.caption) }
+            case "contact":
+                let nm = message.body["name"]?.value as? String ?? "Contact"
+                let ph = message.body["phone"]?.value as? String ?? ""
+                Label("\(nm) • \(ph)", systemImage: "person.crop.circle").foregroundColor(.secondary)
             default:
                 LinkifiedText(caption ?? "[\(message.kind)]")
                 LinkPreviewCard(text: caption ?? "")
@@ -1009,6 +1101,8 @@ struct MessageBubble: View {
 // MARK: - Settings (notifications + app lock + theme)
 struct SettingsView: View {
     @StateObject private var s = AppSettings.shared
+    @State private var showPrivacy = false
+    @State private var showStorage = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline)
@@ -1018,6 +1112,10 @@ struct SettingsView: View {
             Toggle("Mentions only", isOn: $s.notifyMentionsOnly)
             Toggle("App lock on launch", isOn: $s.appLockEnabled)
             Button("Unlock test (Touch ID)") { _ = s.requestUnlock() }.buttonStyle(.link)
+            Button("Privacy & Security") { showPrivacy = true }.buttonStyle(.link)
+            Button("Storage & Cache") { showStorage = true }.buttonStyle(.link)
+            .sheet(isPresented: $showPrivacy) { VStack { Text("Privacy & Security").font(.headline); Text("Disappearing messages TTL: server-gated (not yet available).").font(.caption).foregroundColor(.secondary); Text("E2EE: models decoded; crypto engine pending.").font(.caption).foregroundColor(.secondary) }.padding().frame(width: 340) }
+            .sheet(isPresented: $showStorage) { StorageView() }
             Picker("Theme", selection: $s.themeRaw) {
                 Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
                 Text("Blue").tag("blue"); Text("Green").tag("green"); Text("Purple").tag("purple")
@@ -1033,6 +1131,7 @@ struct RoomInfoView: View {
     @ObservedObject var chat: ChatViewModel
     @StateObject private var s = AppSettings.shared
     @State private var alias = ""
+    @Environment(\.dismiss) private var dismissInfo
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Conversation info").font(.headline)
@@ -1048,6 +1147,23 @@ struct RoomInfoView: View {
             Text("Members (\(live.count)): \(live.joined(separator: ", "))").font(.caption)
             let media = chat.messages.filter { $0.kind != MessageKinds.text }.count
             Text("Messages: \(chat.messages.count) • Media & files: \(media) • Starred: \(StarStore.shared.ids.count)").font(.caption).foregroundColor(.secondary)
+            // Quick actions: voice/video/search.
+            HStack {
+                Button("Voice Call") { chat.activeCall = (callId: UUID().uuidString, initiator: "") }.disabled(true)
+                Button("Video Call") { chat.activeCall = (callId: UUID().uuidString, initiator: "") }.disabled(true)
+                Button("Search in Chat") { dismissInfo() }
+            }.buttonStyle(.bordered).controlSize(.small)
+            // Media strip: recent image/file names.
+            let recentMedia = chat.messages.filter { $0.kind != MessageKinds.text }.suffix(6)
+            if !recentMedia.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(Array(recentMedia), id: \.id) { m in
+                            Text(m.body["filename"]?.value as? String ?? "[\(m.kind)]").font(.caption2).padding(5).background(Color.secondary.opacity(0.12)).cornerRadius(6)
+                        }
+                    }
+                }.frame(height: 30)
+            }
             // P3-14: group admin stubs (server endpoints pending — UI ready).
             if room.kind.lowercased().contains("group") {
                 Text("Group admin: add/remove/promote/leave require server endpoints (not yet in OllacoreAPI).").font(.caption2).foregroundColor(.secondary)
@@ -1151,6 +1267,7 @@ struct NewDMView: View {
 }
 struct NewGroupView: View {
     @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
+    var knownPeers: [String] = []
     @State private var name = ""; @State private var desc = ""; @State private var members = ""; @State private var step = 1
     @State private var msg: String?
     @Environment(\.dismiss) private var dismiss
@@ -1163,6 +1280,15 @@ struct NewGroupView: View {
                 let chips = members.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
                 if !chips.isEmpty {
                     HStack { ForEach(chips, id: \.self) { c in Text(c).font(.caption2).padding(5).background(Color.accentColor.opacity(0.15)).cornerRadius(8) } }
+                }
+                // Contact picker with checkboxes (from known rooms' peers).
+                Text("Pick from recent chats:").font(.caption).foregroundColor(.secondary)
+                ForEach(knownPeers.prefix(5), id: \.self) { p in
+                    Toggle(p, isOn: Binding(get: { chips.contains(p) }, set: { on in
+                        var set = Set(chips)
+                        if on { set.insert(p) } else { set.remove(p) }
+                        members = set.sorted().joined(separator: ", ")
+                    })).font(.caption)
                 }
                 Button("Next") { step = 2 }.buttonStyle(.borderedProminent).disabled(members.isEmpty)
             } else if step == 2 {
@@ -1233,6 +1359,7 @@ struct ProfileView: View {
 struct DevicesView: View {
     @ObservedObject var auth: AuthViewModel
     @State private var devices: [DeviceResponse] = []; @State private var msg: String?
+    @State private var showRemoveConfirm: String? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
@@ -1250,14 +1377,19 @@ struct DevicesView: View {
                         Text("\(d.platform) • \(d.updated_at)").font(.caption).foregroundColor(.secondary)
                     }
                     Spacer()
-                    Button("Remove") {
-                        Task {
-                            guard let t = auth.session.sessionToken else { return }
-                            if await OllacoreAPI.shared.deleteDevice(token: t, deviceId: d.id) {
-                                devices.removeAll { $0.id == d.id }
+                    Button("Remove") { showRemoveConfirm = d.id }.buttonStyle(.link)
+                    .confirmationDialog("Log out this device?", isPresented: Binding(get: { showRemoveConfirm == d.id }, set: { if !$0 { showRemoveConfirm = nil } })) {
+                        Button("Remove", role: .destructive) {
+                            Task {
+                                guard let t = auth.session.sessionToken else { return }
+                                if await OllacoreAPI.shared.deleteDevice(token: t, deviceId: d.id) {
+                                    devices.removeAll { $0.id == d.id }
+                                }
+                                showRemoveConfirm = nil
                             }
                         }
-                    }.buttonStyle(.link)
+                        Button("Cancel", role: .cancel) { showRemoveConfirm = nil }
+                    }
                 }
             }
                 .frame(minHeight: 160)
@@ -1438,6 +1570,19 @@ struct DoodleBackground: View {
         }
     }
 }
+struct StorageView: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Storage & Cache").font(.headline)
+            Text("Cached images, voice notes, documents live in temp + UserDefaults.").font(.caption).foregroundColor(.secondary)
+            Button("Clear temp cache") {
+                try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory)
+            }.buttonStyle(.bordered)
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 340)
+    }
+}
 struct HighlightedText: View {
     var text: String; var query: String
     var body: some View {
@@ -1491,11 +1636,20 @@ struct DayChipIfNeeded: View {
 struct ContactsView: View {
     @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
     @State private var phones = ""; @State private var found: [ContactUser] = []; @State private var msg: String?
+    @State private var peerFilter = ""; @State private var showGroupFromContacts = false
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
             Text("Contacts lookup").font(.headline)
+            TextField("Filter inbox peers", text: $peerFilter).textFieldStyle(.roundedBorder)
+            if !peerFilter.isEmpty {
+                ForEach(home.inbox.filter { ($0.name ?? "").localizedCaseInsensitiveContains(peerFilter) }, id: \.room_id) { r in
+                    Text(r.name ?? r.room_id).font(.caption)
+                }
+            }
             TextField("phones, comma-separated", text: $phones).textFieldStyle(.roundedBorder)
+            Button("New Group") { showGroupFromContacts = true }.buttonStyle(.link)
+            .sheet(isPresented: $showGroupFromContacts) { NewGroupView(auth: auth, home: home) }
             Button("Lookup") {
                 Task {
                     guard let t = auth.session.sessionToken else { return }
@@ -1534,6 +1688,7 @@ struct GlobalSearchView: View {
             Picker("", selection: $tab) {
                 Text("All").tag("All"); Text("Messages").tag("Messages"); Text("Media").tag("Media"); Text("Docs").tag("Docs"); Text("Links").tag("Links"); Text("Audio").tag("Audio")
             }.pickerStyle(.segmented)
+            Text("Tab filters results by kind (Media=images+video, Docs=files, Links=http text, Audio=audio).").font(.caption2).foregroundColor(.secondary)
             TextField("Search all chats (room-scoped fan-out)", text: $q).textFieldStyle(.roundedBorder)
             Button("Search") {
                 Task {

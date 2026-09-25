@@ -152,6 +152,19 @@ public final class OllacoreAPI {
         struct B: Encodable { var member_user_ids: [String]; var name: String }
         return try await exec(req("/directory/conversations/group", method: "POST", sessionToken: token, body: try enc(B(member_user_ids: members, name: name))))
     }
+    // Tier1 stubs: group admin endpoints (server contract pending — safe no-op false until deployed).
+    @discardableResult
+    public func addGroupMember(token: String, groupId: String, userId: String) async -> Bool { false }
+    @discardableResult
+    public func removeGroupMember(token: String, groupId: String, userId: String) async -> Bool { false }
+    @discardableResult
+    public func setGroupAdmin(token: String, groupId: String, userId: String, admin: Bool) async -> Bool { false }
+    @discardableResult
+    public func leaveGroup(token: String, groupId: String) async -> Bool { false }
+    // Tier1 stub: multipart endpoints pending server deployment.
+    public func initMultipart(roomToken: String, roomId: String, filename: String, mime: String, byteSize: Int) async throws -> AttachmentInitResponse {
+        throw ApiException(message: "Multipart not deployed.", code: "not_implemented", httpStatus: 501)
+    }
     public func roomToken(token: String, roomId: String, deviceId: String) async throws -> RoomTokenResponse {
         try await exec(req(url: url(segments: ["directory", "conversations", roomId, "token"], query: [URLQueryItem(name: "device_id", value: deviceId)]), method: "GET", sessionToken: token))
     }
