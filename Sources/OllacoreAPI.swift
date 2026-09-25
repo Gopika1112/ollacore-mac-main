@@ -169,7 +169,8 @@ public final class OllacoreAPI {
     public struct StatusItem: Codable { public var id: String; public var text: String; public var created_at: String }
     public func getStatus(token: String) async throws -> [StatusItem] {
         struct R: Decodable { var items: [StatusItem] }
-        return try await exec(req("/directory/status", method: "GET", sessionToken: token)).items as [StatusItem]
+        let r: R = try await exec(req("/directory/status", method: "GET", sessionToken: token))
+        return r.items
     }
     public func postStatus(token: String, text: String) async throws -> StatusItem {
         struct B: Encodable { var text: String }

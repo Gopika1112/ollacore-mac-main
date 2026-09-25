@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().delegate = self
     }
     // APNs token payload routing: room_id + message_id auto-open target conversation.
-    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) {
         let roomId = userInfo["room_id"] as? String ?? ""
         let messageId = userInfo["message_id"] as? String ?? ""
         guard !roomId.isEmpty else { return }
@@ -1620,13 +1620,14 @@ final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
     var done: (Data?) -> Void
     init(done: @escaping (Data?) -> Void) { self.done = done }
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        done(photo.fileDataRepresentation())
+        let data = photo.fileDataRepresentation()
+        DispatchQueue.main.async { self.done(data) }
     }
 }
 struct CameraPreview: NSViewRepresentable {
     var session: AVCaptureSession
     func makeNSView(context: Context) -> AVCaptureView {
-        let v = AVCaptureView(); v.captureSession = session; return v
+        let v = AVCaptureView(); v.session = session; return v
     }
     func updateNSView(_ v: AVCaptureView, context: Context) {}
 }
