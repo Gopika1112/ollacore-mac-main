@@ -3,9 +3,11 @@ import AppKit
 import AVFoundation
 import AVKit
 import PDFKit
+import UserNotifications
 
 // MARK: - App entry (mirrors MainActivity.kt NavHost: splash -> onboarding -> phone -> otp -> home -> chat)
 @main struct OllaCoreMacApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var auth = AuthViewModel()
     @StateObject private var home = HomeViewModel()
     @StateObject private var settings = AppSettings.shared
@@ -59,6 +61,26 @@ struct LockGateView: View {
 }
 func accentFor(_ theme: String) -> Color {
     switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; default: return .accentColor }
+}
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationDidFinishLaunching(_ note: Notification) {
+        UNUserNotificationCenter.current().delegate = self
+    }
+    // APNs token payload routing: room_id + message_id auto-open target conversation.
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+        let roomId = userInfo["room_id"] as? String ?? ""
+        let messageId = userInfo["message_id"] as? String ?? ""
+        guard !roomId.isEmpty else { return }
+        NotificationCenter.default.post(name: .ollacorePushOpen, object: nil, userInfo: ["room_id": roomId, "message_id": messageId])
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler handler: @escaping () -> Void) {
+        let info = response.notification.request.content.userInfo
+        application(NSApp, didReceiveRemoteNotification: info)
+        handler()
+    }
+}
+extension Notification.Name {
+    static let ollacorePushOpen = Notification.Name("ollacore.push.open")
 }
 struct SplashView: View {
     @State private var scale: CGFloat = 0.9
@@ -347,6 +369,13 @@ struct HomeView: View {
             }
         }
         .task { if let t = auth.session.sessionToken { await home.refresh(token: t) } }
+        // APNs routing: auto-open + focus target conversation on push tap.
+        .onReceive(NotificationCenter.default.publisher(for: .ollacorePushOpen)) { note in
+            guard let roomId = note.userInfo?["room_id"] as? String,
+                  let room = home.inbox.first(where: { $0.room_id == roomId }) else { return }
+            selectedRoom = room
+            jumpToMessageId = note.userInfo?["message_id"] as? String
+        }
         // Dock unread badge: total non-own unread, zero clears.
         .onChange(of: home.inbox.map(\.unread_count).reduce(0, +)) { _, total in
             let n = max(0, total)
@@ -395,6 +424,7 @@ struct ChatDetailView: View {
     @State private var showPreview = false
     @State private var previewCaption = ""
     @State private var showAttachSheet = false
+    @State private var showCamera = false
     @State private var showCallScreen = false
     @State private var cameraNote: String? = nil
     @State private var pendingPick: PendingPick? = nil
@@ -687,11 +717,18 @@ struct ChatDetailView: View {
                     AttachTile(icon: "waveform", label: "Audio") { showAttachSheet = false; pickAndSend() }
                     AttachTile(icon: "mappin", label: "Location") { showAttachSheet = false; chat.sendLocation(roomId: room.room_id, lat: 12.9716, lon: 77.5946) }
                     AttachTile(icon: "person.crop.circle", label: "Contact") { showAttachSheet = false; chat.sendContact(roomId: room.room_id, name: "Demo Contact", phone: "+10000000000") }
-                    AttachTile(icon: "camera", label: "Camera") { showAttachSheet = false; cameraNote = "Camera capture needs Mac camera permission — use Attach for now." }
+                    AttachTile(icon: "camera", label: "Camera") { showAttachSheet = false; showCamera = true }
                 }
                 if let n = cameraNote { Text(n).font(.caption).foregroundColor(.secondary) }
                 Button("Close") { showAttachSheet = false }
             }.padding().frame(width: 380)
+            .sheet(isPresented: $showCamera) { CameraCaptureView(onCapture: { data in
+                // Preview-first: hand captured JPEG to pending pick, upload only on Send.
+                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("camera-\(Int(Date().timeIntervalSince1970)).jpg")
+                try? data.write(to: tmp)
+                pendingPick = PendingPick(data: data, filename: tmp.lastPathComponent, mime: "image/jpeg", kind: MessageKinds.image, fileURL: tmp, error: nil)
+                showPreview = true
+            }) }
         }
         .sheet(isPresented: $showPreview) {
             // Genuine preview: file picked FIRST, shown here, uploaded only on Send.
@@ -1521,6 +1558,78 @@ struct StarBadge: View {
 enum DockBadge {
     static func clear() { NSApp.dockTile.badgeLabel = "" }
 }
+struct CameraCaptureView: View {
+    var onCapture: (Data) -> Void
+    @StateObject private var model = CameraModel()
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Camera").font(.headline)
+            CameraPreview(session: model.session).frame(height: 240).cornerRadius(8)
+            if let e = model.error { Text(e).font(.caption).foregroundColor(.red) }
+            HStack {
+                Button("Capture") { model.capture { data in
+                    if let data { onCapture(data) }
+                    dismiss()
+                } }
+                .buttonStyle(.borderedProminent).disabled(!model.ready)
+                Button("Cancel", role: .cancel) { dismiss() }
+            }
+        }.padding().frame(width: 380)
+        .onAppear { model.start() }
+        .onDisappear { model.stop() }
+    }
+}
+final class CameraModel: NSObject, ObservableObject {
+    let session = AVCaptureSession()
+    @Published var ready = false
+    @Published var error: String?
+    private let output = AVCapturePhotoOutput()
+    private var delegate: PhotoDelegate?
+    func start() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .denied, .restricted: error = "Camera access denied. Enable it in System Settings."; return
+        default: break
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                self.session.beginConfiguration()
+                guard let dev = AVCaptureDevice.default(for: .video),
+                      let input = try? AVCaptureDeviceInput(device: dev),
+                      self.session.canAddInput(input) else {
+                    DispatchQueue.main.async { self.error = "No camera available." }
+                    self.session.commitConfiguration()
+                    return
+                }
+                self.session.addInput(input)
+                if self.session.canAddOutput(self.output) { self.session.addOutput(self.output) }
+                self.session.commitConfiguration()
+                self.session.startRunning()
+                DispatchQueue.main.async { self.ready = true }
+            }
+        }
+    }
+    func capture(_ done: @escaping (Data?) -> Void) {
+        delegate = PhotoDelegate(done: done)
+        output.capturePhoto(with: AVCapturePhotoSettings(), delegate: delegate!)
+    }
+    func stop() { session.stopRunning() }
+}
+final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+    var done: (Data?) -> Void
+    init(done: @escaping (Data?) -> Void) { self.done = done }
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        done(photo.fileDataRepresentation())
+    }
+}
+struct CameraPreview: NSViewRepresentable {
+    var session: AVCaptureSession
+    func makeNSView(context: Context) -> AVCaptureView {
+        let v = AVCaptureView(); v.captureSession = session; return v
+    }
+    func updateNSView(_ v: AVCaptureView, context: Context) {}
+}
 struct CallScreenView: View {
     var callId: String; var room: InboxItem
     @ObservedObject var chat: ChatViewModel
@@ -1531,6 +1640,8 @@ struct CallScreenView: View {
         VStack(spacing: 16) {
             Text("Call — \(room.name ?? room.room_id)").font(.headline)
             // Local PiP + remote grid mock (media engine pending WebRTC framework).
+            // NOTE: replace these RoundedRectangles with RTCMTLVideoView surfaces
+            // (local PiP + remote grid) once libwebrtc is linked via Package.swift.
             HStack {
                 RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.3)).frame(width: 120, height: 90)
                     .overlay(Text("You").font(.caption))
@@ -1645,22 +1756,40 @@ struct DoodleBackground: View {
 struct UpdatesView: View {
     @State private var items = UserDefaults.standard.stringArray(forKey: "local_status_v1") ?? []
     @State private var draft = ""
+    @State private var note: String? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
             Text("Updates").font(.headline)
-            Text("Local stories (backend Status API pending).").font(.caption).foregroundColor(.secondary)
+            Text("Local stories; server Status API sync when deployed.").font(.caption).foregroundColor(.secondary)
             HStack {
                 TextField("New status", text: $draft).textFieldStyle(.roundedBorder)
                 Button("Post") {
                     guard !draft.isEmpty else { return }
-                    items.insert(draft, at: 0); draft = ""
+                    let text = draft; draft = ""
+                    items.insert(text, at: 0)
                     UserDefaults.standard.set(items, forKey: "local_status_v1")
+                    // Backend hook: POST /v1/status when live; local fallback on 501.
+                    Task {
+                        guard let t = KeychainHelper.read(account: "session_token"),
+                              let posted = try? await OllacoreAPI.shared.postStatus(token: t, text: text) else {
+                            note = "Saved locally (server Status API pending)."
+                            return
+                        }
+                        note = "Posted to server (\(posted.id))."
+                    }
                 }.buttonStyle(.borderedProminent).disabled(draft.isEmpty)
             }
             List(items, id: \.self) { Text($0) }.frame(minHeight: 140)
+            if let note { Text(note).font(.caption).foregroundColor(.secondary) }
             Button("Close") { dismiss() }
         }.padding().frame(width: 360)
+        .task {
+            // Backend hook: GET /v1/status when live; keep local on failure.
+            guard let t = KeychainHelper.read(account: "session_token"),
+                  let remote = try? await OllacoreAPI.shared.getStatus(token: t) else { return }
+            items = remote.map(\.text) + items
+        }
     }
 }
 struct AttachTile: View {

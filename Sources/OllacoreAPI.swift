@@ -165,6 +165,16 @@ public final class OllacoreAPI {
     public func initMultipart(roomToken: String, roomId: String, filename: String, mime: String, byteSize: Int) async throws -> AttachmentInitResponse {
         throw ApiException(message: "Multipart not deployed.", code: "not_implemented", httpStatus: 501)
     }
+    // Status/Stories API (backend pending — throws 501 until deployed; callers fall back to local).
+    public struct StatusItem: Codable { public var id: String; public var text: String; public var created_at: String }
+    public func getStatus(token: String) async throws -> [StatusItem] {
+        struct R: Decodable { var items: [StatusItem] }
+        return try await exec(req("/directory/status", method: "GET", sessionToken: token)).items as [StatusItem]
+    }
+    public func postStatus(token: String, text: String) async throws -> StatusItem {
+        struct B: Encodable { var text: String }
+        return try await exec(req("/directory/status", method: "POST", sessionToken: token, body: try enc(B(text: text))))
+    }
     public func roomToken(token: String, roomId: String, deviceId: String) async throws -> RoomTokenResponse {
         try await exec(req(url: url(segments: ["directory", "conversations", roomId, "token"], query: [URLQueryItem(name: "device_id", value: deviceId)]), method: "GET", sessionToken: token))
     }
