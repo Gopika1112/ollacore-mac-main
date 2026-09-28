@@ -225,6 +225,8 @@ struct HomeView: View {
     @State private var showContacts = false
     @State private var showGlobalSearch = false
     @State private var showUpdates = false
+    @State private var showCommunity = false
+    @State private var showBroadcast = false
     @State private var showStarred = false
     @State private var jumpToMessageId: String? = nil
     var body: some View {
@@ -374,6 +376,8 @@ struct HomeView: View {
             .toolbar {
                 ToolbarItemGroup {
                     Button("Updates") { showUpdates = true }
+                    Button("Community") { showCommunity = true }
+                    Button("Broadcast") { showBroadcast = true }
                     Button("Starred") { showStarred = true }
                     Button("Contacts") { showContacts = true }
                     Button("Search") { showGlobalSearch = true }
@@ -394,6 +398,8 @@ struct HomeView: View {
                 }
             }) }
             .sheet(isPresented: $showUpdates) { UpdatesView() }
+            .sheet(isPresented: $showCommunity) { CommunityView() }
+            .sheet(isPresented: $showBroadcast) { BroadcastView(auth: auth, home: home) }
             .sheet(isPresented: $showStarred) { StarredView(chatRooms: home.inbox, onJump: { roomId, msgId in
                 if let room = home.inbox.first(where: { $0.room_id == roomId }) {
                     selectedRoom = room
@@ -1586,7 +1592,37 @@ struct CallsView: View {    @StateObject private var log = CallLogStore()
                 .frame(minHeight: 160)
             HStack { Button("Clear") { log.clear() }; Spacer(); Button("Close") { dismiss() } }
             if let r = chatForCallback { Text("Dial \(r) once WebRTC lands — RtcWebSocket ready.").font(.caption).foregroundColor(.secondary) }
+            Divider()
+            CallLinkSection()
         }.padding().frame(width: 400)
+    }
+}
+struct CallLinkSection: View {
+    @StateObject private var store = CallLinkStore.shared
+    @State private var expiry = "24h"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Call Links").font(.headline)
+            Text("Generate a shareable meeting link (local token; backend validation pending).").font(.caption).foregroundColor(.secondary)
+            HStack {
+                Picker("Expiry", selection: $expiry) { Text("24 hours").tag("24h"); Text("Permanent").tag("permanent") }.pickerStyle(.segmented).frame(width: 200)
+                Button("Create Link") {
+                    let link = store.create(expiry: expiry)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link.url, forType: .string)
+                }.buttonStyle(.borderedProminent)
+            }
+            ForEach(store.links.prefix(3)) { l in
+                HStack {
+                    Text(l.url).font(.caption).lineLimit(1)
+                    Spacer()
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(l.url, forType: .string)
+                    }.buttonStyle(.link)
+                }
+            }
+        }
     }
 }
 struct LinkifiedText: View {
@@ -1852,6 +1888,56 @@ struct DoodleBackground: View {
                 while y < geo.size.height { var x: CGFloat = 8; while x < geo.size.width { p.move(to: CGPoint(x: x, y: y)); p.addLine(to: CGPoint(x: x + 1, y: y)); x += 28 }; y += 28 }
             }.stroke(Color.secondary.opacity(0.08), lineWidth: 1.5)
         }
+    }
+}
+struct CommunityView: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Communities").font(.headline)
+            Text("Organize team chats under communities (like Slack workspaces). Backend workspaces pending — this is an honest placeholder.").font(.callout).foregroundColor(.secondary).multilineTextAlignment(.center)
+            Text("Planned: community create, channels, member hierarchy.").font(.caption).foregroundColor(.secondary)
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 380)
+    }
+}
+struct BroadcastView: View {
+    @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
+    @StateObject private var store = BroadcastStore.shared
+    @State private var name = ""; @State private var recipients = ""; @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Broadcast Lists").font(.headline)
+            Text("One-to-many announcements without exposing participant numbers.").font(.caption).foregroundColor(.secondary)
+            TextField("List name", text: $name).textFieldStyle(.roundedBorder)
+            TextField("recipient user ids, comma-separated", text: $recipients).textFieldStyle(.roundedBorder)
+            Button("Create list") {
+                let ids = recipients.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                guard !name.isEmpty, !ids.isEmpty else { msg = "Name + recipients required."; return }
+                store.create(name: name, recipients: ids)
+                name = ""; recipients = ""; msg = "List saved."
+            }.buttonStyle(.borderedProminent)
+            List(store.lists) { l in
+                HStack {
+                    VStack(alignment: .leading) { Text(l.name).bold().font(.callout); Text(l.recipients.joined(separator: ", ")).font(.caption).foregroundColor(.secondary) }
+                    Spacer()
+                    Button("Send") {
+                        Task {
+                            guard let t = auth.session.sessionToken else { return }
+                            var ok = 0
+                            for uid in l.recipients {
+                                if (try? await OllacoreAPI.shared.openDirect(token: t, peerUserId: uid)) != nil { ok += 1 }
+                            }
+                            msg = ok == l.recipients.count ? "Broadcast sent to \(ok)" : "Sent to \(ok)/\(l.recipients.count)"
+                            await home.refresh(token: t)
+                        }
+                    }.buttonStyle(.link)
+                }
+            }.frame(minHeight: 140)
+            if let msg { Text(msg).font(.caption).foregroundColor(.secondary) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 420)
     }
 }
 struct UpdatesView: View {

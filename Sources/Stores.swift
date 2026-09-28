@@ -856,8 +856,40 @@ public struct StarredInfo: Codable { public var id: String; public var sender: S
     public func info(for id: String) -> StarredInfo? { meta[id] }
 }
 
-public struct LocalContact: Codable, Identifiable {
-    public var id: String
+// MARK: - CallLinkStore + BroadcastStore (local-first)
+public struct CallLink: Codable, Identifiable { public var id: String; public var url: String; public var expiry: String; public var createdAt: Date }
+@MainActor public final class CallLinkStore: ObservableObject {
+    public static let shared = CallLinkStore()
+    @Published public var links: [CallLink] = []
+    private let key = "call_links_v1"
+    public init() {
+        if let d = UserDefaults.standard.data(forKey: key),
+           let a = try? JSONDecoder().decode([CallLink].self, from: d) { links = a }
+    }
+    public func create(expiry: String = "24h") -> CallLink {
+        let id = UUID().uuidString.prefix(8).lowercased()
+        let link = CallLink(id: String(id), url: "https://call.ollachat.com/join/\(id)", expiry: expiry, createdAt: Date())
+        links.insert(link, at: 0)
+        UserDefaults.standard.set(try? JSONEncoder().encode(links), forKey: key)
+        return link
+    }
+}
+public struct BroadcastList: Codable, Identifiable { public var id: String; public var name: String; public var recipients: [String] }
+@MainActor public final class BroadcastStore: ObservableObject {
+    public static let shared = BroadcastStore()
+    @Published public var lists: [BroadcastList] = []
+    private let key = "broadcast_lists_v1"
+    public init() {
+        if let d = UserDefaults.standard.data(forKey: key),
+           let a = try? JSONDecoder().decode([BroadcastList].self, from: d) { lists = a }
+    }
+    public func create(name: String, recipients: [String]) {
+        lists.insert(BroadcastList(id: UUID().uuidString, name: name, recipients: recipients), at: 0)
+        UserDefaults.standard.set(try? JSONEncoder().encode(lists), forKey: key)
+    }
+}
+
+public struct LocalContact: Codable, Identifiable {    public var id: String
     public var firstName: String; public var lastName: String; public var username: String
     public var phone: String; public var sync: Bool
     public init(id: String = UUID().uuidString, firstName: String, lastName: String, username: String, phone: String, sync: Bool = true) {
