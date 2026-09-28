@@ -152,6 +152,48 @@ public struct FailedDraft: Identifiable {
     public init(id: String, text: String) { self.id = id; self.text = text }
 }
 
+// MARK: - RoomDeltaStore (background/unselected-room mutations)
+// The chat socket is per-room, so events for unselected rooms never arrive live.
+// This shared store records deltas observed anywhere (push, directory socket
+// in future, or cross-room echoes) and replays them on join, so returning to a
+// room never needs a manual reopen. History refetch remains the source of truth.
+@MainActor public final class RoomDeltaStore: ObservableObject {
+    public static let shared = RoomDeltaStore()
+    private var updated: [String: [String: MessageResponse]] = [:] // room -> id -> message
+    private var deleted: [String: Set<String>] = [:]
+    public func recordUpdated(_ m: MessageResponse) {
+        updated[m.room_id, default: [:]][m.id] = m
+    }
+    public func recordDeleted(roomId: String, messageId: String) {
+        deleted[roomId, default: []].insert(messageId)
+        updated[roomId]?.removeValue(forKey: messageId)
+    }
+    public func recordCreated(_ m: MessageResponse) {
+        // New background message: keep latest copy; join merges by id.
+        updated[m.room_id, default: [:]][m.id] = m
+    }
+    /// Replays cached deltas onto freshly loaded history. Returns merged list.
+    public func merge(roomId: String, messages: [MessageResponse], deletedIds: Set<String>) -> (messages: [MessageResponse], deletedIds: Set<String>) {
+        var msgs = messages
+        var dels = deletedIds
+        if let ups = updated[roomId] {
+            for (id, m) in ups {
+                if let i = msgs.firstIndex(where: { $0.id == id }) { msgs[i] = m }
+                else { msgs.append(m) }
+            }
+        }
+        if let ds = deleted[roomId] {
+            for id in ds { dels.insert(id) }
+        }
+        msgs.sort { $0.event_seq < $1.event_seq }
+        return (msgs, dels)
+    }
+    public func clear(roomId: String) {
+        updated.removeValue(forKey: roomId)
+        deleted.removeValue(forKey: roomId)
+    }
+}
+
 @MainActor public final class ChatViewModel: ObservableObject {
     @Published public var messages: [MessageResponse] = []
     @Published public var rateLimitedNotice: String?
@@ -216,6 +258,12 @@ public struct FailedDraft: Identifiable {
             historyError = nil // success clears any error left by an older join
             messages = page.messages.sorted { $0.event_seq < $1.event_seq }
             seenIds = Set(messages.map(\.id))
+            // Background deltas: replay cached mutations from push/directory echoes.
+            let merged = RoomDeltaStore.shared.merge(roomId: roomId, messages: messages, deletedIds: deletedIds)
+            messages = merged.messages
+            deletedIds = merged.deletedIds
+            seenIds = Set(messages.map(\.id))
+            RoomDeltaStore.shared.clear(roomId: roomId)
             hasMoreHistory = page.hasMore
             enforceWindow()
             historyLoaded = true
@@ -242,8 +290,12 @@ public struct FailedDraft: Identifiable {
                 case .connected: self.isConnected = true
                 case .disconnected: self.isConnected = false
                 case .messageCreated(let m):
-                    guard self.isCurrentRoom(m.room_id) else { break } // cross-room events never apply
-                    guard !self.seenIds.contains(m.id) else { break } // duplicate prevention
+                    guard !self.seenIds.contains(m.id) || !self.isCurrentRoom(m.room_id) else { break } // duplicate prevention
+                    if !self.isCurrentRoom(m.room_id) {
+                        // Background room: cache delta for merge on join; no injection into current list.
+                        RoomDeltaStore.shared.recordCreated(m)
+                        break
+                    }
                     self.seenIds.insert(m.id)
                     self.messages.append(m)
                     self.messages.sort { $0.event_seq < $1.event_seq } // ordering by seq
@@ -254,10 +306,16 @@ public struct FailedDraft: Identifiable {
                         if let cid = m.client_message_id { self.clearPending(clientId: cid) }
                     }
                 case .messageUpdated(let m):
-                    guard self.isCurrentRoom(m.room_id) else { break }
+                    if !self.isCurrentRoom(m.room_id) {
+                        RoomDeltaStore.shared.recordUpdated(m)
+                        break
+                    }
                     if let i = self.messages.firstIndex(where: { $0.id == m.id }) { self.messages[i] = m }
                 case .messageDeleted(let room, let id):
-                    guard self.isCurrentRoom(room) else { break }
+                    if !self.isCurrentRoom(room) {
+                        RoomDeltaStore.shared.recordDeleted(roomId: room, messageId: id)
+                        break
+                    }
                     // Tombstone: keep the row so history doesn't look corrupted.
                     self.deletedIds.insert(id)
                     self.reactions.removeValue(forKey: id)
