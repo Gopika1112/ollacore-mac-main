@@ -61,7 +61,16 @@ struct LockGateView: View {
     }
 }
 func accentFor(_ theme: String) -> Color {
-    switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; case "pink": return Color(red: 0.93, green: 0.28, blue: 0.60); default: return .accentColor }
+    switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; case "pink": return Color(red: 0.93, green: 0.28, blue: 0.60); case "whatsapp": return Color(red: 0.0, green: 0.66, blue: 0.52); default: return .accentColor }
+}
+// WhatsApp Mac palette (light-first; dark adapts via opacity).
+enum WA {
+    static let green = Color(red: 0.0, green: 0.66, blue: 0.52)
+    static let outgoing = Color(red: 0.86, green: 0.97, blue: 0.78) // #DCF8C6
+    static let incoming = Color.white
+    static let sidebar = Color(red: 0.94, green: 0.95, blue: 0.96) // #F0F2F5
+    static let tickBlue = Color(red: 0.33, green: 0.74, blue: 0.92) // #53BDEB
+    static let systemChip = Color(red: 1.0, green: 0.96, blue: 0.85)
 }
 func chatBackground(_ theme: String) -> Color {
     // Signature pink identity: pastel cream light, black-plum dark.
@@ -326,26 +335,31 @@ struct HomeView: View {
                                         else { selectedChatIds.insert(item.room_id) }
                                     }
                             }
-                            // Sidebar avatar circle.
+                            // Sidebar avatar circle (WA green ring).
                             Text(String((item.name ?? item.peer?.display_name ?? "?").prefix(1)).uppercased())
                                 .font(.caption).bold().foregroundColor(.white)
-                                .frame(width: 30, height: 30).background(Color.accentColor.opacity(0.8)).clipShape(Circle())
-                            VStack(alignment: .leading) {
-                                let title = item.name ?? item.peer?.display_name ?? item.room_id
-                                Text(title).bold().lineLimit(1)
+                                .frame(width: 34, height: 34).background(WA.green.opacity(0.85)).clipShape(Circle())
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    let title = item.name ?? item.peer?.display_name ?? item.room_id
+                                    Text(title).bold().lineLimit(1)
+                                    Spacer()
+                                    if let ts = item.last_message?.created_at { Text(String(ts.prefix(10))).font(.caption2).foregroundColor(ts.isEmpty ? .clear : .secondary) }
+                                }
                                 let preview = item.last_message?.preview ?? "No messages"
                                 // BUG-09: "You:" prefix when last message is ours.
                                 let isOwn = item.last_message?.sender_id != nil && item.last_message?.sender_id == auth.session.userId
                                 Text("\(isOwn ? "You: " : "")\(preview)").font(.caption).foregroundColor(.secondary).lineLimit(1)
-                                if let ts = item.last_message?.created_at { Text(ts).font(.caption2).foregroundColor(.secondary) }
                             }
                             Spacer()
+                            VStack(alignment: .trailing, spacing: 4) {
                             if settings.pinnedRooms.contains(item.room_id) {
                                 Image(systemName: "pin.fill").font(.caption2).foregroundColor(.secondary)
                             }
                             if item.unread_count > 0 {
                                 Text("\(item.unread_count)").font(.caption2).bold()
-                                    .padding(6).background(Color.accentColor).foregroundColor(.white).clipShape(Circle())
+                                    .padding(6).background(WA.green).foregroundColor(.white).clipShape(Circle())
+                            }
                             }
                         }.tag(item)
                         .contextMenu {
@@ -650,7 +664,7 @@ struct ChatDetailView: View {
                         // System notice chip.
                         if m.kind == "system" || m.kind == "event" {
                             Text(m.body["text"]?.value as? String ?? "[system]").font(.caption).foregroundColor(.secondary)
-                                .padding(6).background(Color.secondary.opacity(0.12)).cornerRadius(8)
+                                .padding(.horizontal, 10).padding(.vertical, 5).background(WA.systemChip).cornerRadius(8)
                                 .frame(maxWidth: .infinity, alignment: .center)
                         } else {
                         MessageBubble(message: m, roomId: room.room_id, chat: chat,
@@ -755,11 +769,11 @@ struct ChatDetailView: View {
                 }
                 TextField("Message", text: $draft)
                     .textFieldStyle(.plain)
-                    .padding(8)
+                    .padding(10)
                     .foregroundColor(.primary)
                     .background(Color(nsColor: .textBackgroundColor))
-                    .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.4)))
+                    .cornerRadius(20)
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.secondary.opacity(0.25)))
                     .onChange(of: draft) { _, v in
                         drafts.set(v, for: room.room_id)
                         // P1-7: typing send with 5s inactivity timeout.
@@ -784,6 +798,7 @@ struct ChatDetailView: View {
                     typingStopTask?.cancel(); wasTyping = false
                     chat.send(roomId: room.room_id, text: text); draft = ""; drafts.clear(roomId: room.room_id)
                 }.buttonStyle(.borderedProminent).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .tint(WA.green)
             }.padding()
             if recorder.isRecording {
                 HStack(spacing: 4) {
@@ -1219,7 +1234,13 @@ struct MessageBubble: View {
             }
             }
         }
-        .padding(8).background(Color.accentColor.opacity(0.12)).cornerRadius(8)
+        .padding(8)
+        .background(isOwn ? WA.outgoing : WA.incoming)
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.06), radius: 1, x: 0, y: 1)
+        .frame(maxWidth: .infinity, alignment: isOwn ? .trailing : .leading)
+        .padding(.leading, isOwn ? 60 : 4)
+        .padding(.trailing, isOwn ? 4 : 60)
         .onTapGesture {
             if chat.selectionMode { chat.toggleSelect(id: message.id) }
         }
@@ -1298,7 +1319,7 @@ struct SettingsView: View {
             .sheet(isPresented: $showStorage) { StorageView() }
             Picker("Theme", selection: $s.themeRaw) {
                 Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
-                Text("Blue").tag("blue"); Text("Green").tag("green"); Text("Purple").tag("purple"); Text("Pink").tag("pink")
+                Text("Blue").tag("blue"); Text("Green").tag("green"); Text("Purple").tag("purple"); Text("Pink").tag("pink"); Text("WhatsApp").tag("whatsapp")
             }.pickerStyle(.segmented)
             HStack { Text("Text size"); Slider(value: $s.fontScale, in: 0.85...1.3, step: 0.05); Text(String(format: "%.2fx", s.fontScale)).font(.caption) }
             Toggle("Send read receipts", isOn: $s.sendReadReceipts)
@@ -2166,7 +2187,7 @@ struct DayChipIfNeeded: View {
         let prev = idx > 0 ? String(messages[idx - 1].created_at.prefix(10)) : ""
         if day != prev {
             Text(day).font(.caption2).foregroundColor(.secondary)
-                .padding(4).background(Color.secondary.opacity(0.12)).cornerRadius(6)
+                .padding(.horizontal, 10).padding(.vertical, 4).background(WA.systemChip).cornerRadius(8)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
     }

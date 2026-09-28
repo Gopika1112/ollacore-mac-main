@@ -555,9 +555,11 @@ public struct FailedDraft: Identifiable {
         }
     }
     public func receiptColor(for messageId: String) -> Color {
-        // Pink identity for read ticks when pink theme active.
+        // WhatsApp-style ticks: grey sent/delivered, WA blue read (pink theme keeps pink).
         if receipts[messageId] == .read {
-            return AppSettings.shared.themeRaw == "pink" ? Color(red: 0.93, green: 0.28, blue: 0.60) : .blue
+            if AppSettings.shared.themeRaw == "pink" { return Color(red: 0.93, green: 0.28, blue: 0.60) }
+            if AppSettings.shared.themeRaw == "whatsapp" { return Color(red: 0.33, green: 0.74, blue: 0.92) }
+            return .blue
         }
         return .secondary
     }
