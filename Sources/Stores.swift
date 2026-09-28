@@ -479,6 +479,8 @@ public struct FailedDraft: Identifiable {
         Task { _ = await api.removeReaction(roomToken: token, roomId: roomId, messageId: messageId, emoji: emoji) }
     }
     public func markVisibleAsRead(roomId: String) {
+        // Privacy toggle: skip read receipts when disabled.
+        guard AppSettings.shared.sendReadReceipts else { return }
         // One receipt for the latest message: the read cursor already covers everything before it.
         guard let last = messages.last else { return }
         let token = currentToken
@@ -495,7 +497,11 @@ public struct FailedDraft: Identifiable {
         }
     }
     public func receiptColor(for messageId: String) -> Color {
-        receipts[messageId] == .read ? .blue : .secondary
+        // Pink identity for read ticks when pink theme active.
+        if receipts[messageId] == .read {
+            return AppSettings.shared.themeRaw == "pink" ? Color(red: 0.93, green: 0.28, blue: 0.60) : .blue
+        }
+        return .secondary
     }
     public enum UploadState: Equatable {
         case idle, uploading(filename: String), failed(filename: String, message: String)
@@ -741,6 +747,13 @@ public struct FailedDraft: Identifiable {
     @Published public var notifyCalls = true
     @Published public var notifyMentionsOnly = false
     @Published public var disappearingTTL = "off"
+    @Published public var sendReadReceipts = true
+    @Published public var blockedContacts: [String] = [] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(blockedContacts), forKey: "blocked_contacts_v1") }
+    }
+    @Published public var fontScale: Double = 1.0 {
+        didSet { UserDefaults.standard.set(fontScale, forKey: "opt_font_scale") }
+    }
     @Published public var mutedRooms: [String: Bool] = [:] {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(mutedRooms), forKey: "muted_rooms_v1") }
     }
@@ -760,6 +773,9 @@ public struct FailedDraft: Identifiable {
         notificationsEnabled = UserDefaults.standard.object(forKey: "opt_notifications") as? Bool ?? true
         appLockEnabled = UserDefaults.standard.object(forKey: "opt_app_lock") as? Bool ?? false
         themeRaw = UserDefaults.standard.string(forKey: "opt_theme") ?? "system"
+        fontScale = UserDefaults.standard.object(forKey: "opt_font_scale") as? Double ?? 1.0
+        if let d = UserDefaults.standard.data(forKey: "blocked_contacts_v1"),
+           let a = try? JSONDecoder().decode([String].self, from: d) { blockedContacts = a }
         if let d = UserDefaults.standard.data(forKey: "muted_rooms_v1"),
            let m = try? JSONDecoder().decode([String: Bool].self, from: d) { mutedRooms = m }
         if let d = UserDefaults.standard.data(forKey: "pinned_rooms_v1"),

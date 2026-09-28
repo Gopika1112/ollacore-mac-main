@@ -30,6 +30,7 @@ import UserNotifications
             }.frame(minWidth: 900, minHeight: 600)
                 .tint(accentFor(settings.themeRaw))
                 .preferredColorScheme(settings.themeRaw == "dark" ? .dark : settings.themeRaw == "light" ? .light : nil)
+                .background(chatBackground(settings.themeRaw))
                 .overlay { if locked { LockGateView(unlock: { locked = false }) } }
                 .onAppear {
                     NSApp.activate(ignoringOtherApps: true)
@@ -60,7 +61,12 @@ struct LockGateView: View {
     }
 }
 func accentFor(_ theme: String) -> Color {
-    switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; default: return .accentColor }
+    switch theme { case "blue": return .blue; case "green": return .green; case "purple": return .purple; case "pink": return Color(red: 0.93, green: 0.28, blue: 0.60); default: return .accentColor }
+}
+func chatBackground(_ theme: String) -> Color {
+    // Signature pink identity: pastel cream light, black-plum dark.
+    if theme == "pink" { return Color(red: 1.0, green: 0.98, blue: 0.96) }
+    return Color(nsColor: .windowBackgroundColor)
 }
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -670,6 +676,7 @@ struct ChatDetailView: View {
                 }
             }.padding() }
                 .background(DoodleBackground())
+                .font(.system(size: 13 * settings.fontScale))
                 .onChange(of: jumpToMessageId) { _, target in
                     guard let target, chat.messages.contains(where: { $0.id == target }) else { return }
                     withAnimation { proxy.scrollTo(target, anchor: .center) }
@@ -1217,6 +1224,22 @@ struct SettingsView: View {
     @State private var showPrivacy = false
     @State private var showStorage = false
     @State private var showE2EE = false
+    @State private var showBlocked = false
+    @State private var showAux = false
+    @State private var auxMsg = ""
+    @State private var auxMsgTitle = ""
+    private let auxRows = ["Payments", "Subscriptions", "Parental Controls", "Lists Manager", "Language", "Help & FAQ", "Invite a Friend"]
+    private func auxText(for row: String) -> String {
+        switch row {
+        case "Payments": auxMsgTitle = "Payments"; return "Wallet balance and history via Stripe/UPI — backend integration pending."
+        case "Subscriptions": auxMsgTitle = "Subscriptions"; return "Premium features and cloud storage tiers — backend integration pending."
+        case "Parental Controls": auxMsgTitle = "Parental Controls"; return "Screen time and restricted contacts gate — backend integration pending."
+        case "Lists Manager": auxMsgTitle = "Lists Manager"; return "Custom chat category grouping — local lists coming soon."
+        case "Language": auxMsgTitle = "Language"; return "System default, English, Spanish, French, German — picker pending."
+        case "Help & FAQ": auxMsgTitle = "Help & FAQ"; return "Troubleshooting guides; export logs from Settings > Storage."
+        default: auxMsgTitle = "Invite a Friend"; return "Copy the app download link to share with friends."
+        }
+    }
     @State private var pushMsg: String? = nil
     private var authTokenForPush: String? { KeychainHelper.read(account: "session_token") }
     var body: some View {
@@ -1243,8 +1266,22 @@ struct SettingsView: View {
             .sheet(isPresented: $showStorage) { StorageView() }
             Picker("Theme", selection: $s.themeRaw) {
                 Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
-                Text("Blue").tag("blue"); Text("Green").tag("green"); Text("Purple").tag("purple")
+                Text("Blue").tag("blue"); Text("Green").tag("green"); Text("Purple").tag("purple"); Text("Pink").tag("pink")
             }.pickerStyle(.segmented)
+            HStack { Text("Text size"); Slider(value: $s.fontScale, in: 0.85...1.3, step: 0.05); Text(String(format: "%.2fx", s.fontScale)).font(.caption) }
+            Toggle("Send read receipts", isOn: $s.sendReadReceipts)
+            Button("Blocked contacts (\(s.blockedContacts.count))") { showBlocked = true }.buttonStyle(.link)
+            .sheet(isPresented: $showBlocked) { BlockedView() }
+            ForEach(auxRows, id: \.self) { row in
+                Button(row) { auxMsg = auxText(for: row); showAux = true }.buttonStyle(.link)
+            }
+            .sheet(isPresented: $showAux) {
+                VStack(spacing: 12) {
+                    Text(auxMsgTitle).font(.headline)
+                    Text(auxMsg).font(.callout).foregroundColor(.secondary).multilineTextAlignment(.center)
+                    Button("Close") { showAux = false }
+                }.padding().frame(width: 360)
+            }
             Text("Stored locally in UserDefaults; no server call.").font(.caption).foregroundColor(.secondary)
         }.padding().frame(width: 340)
     }
@@ -1999,6 +2036,25 @@ struct E2EEInfoView: View {
             Text("Safety number: \(String(format: "%06d %06d", fp % 1000000, (fp / 1000000) % 1000000))").font(.callout).monospaced()
             Text("E2EEStub epoch rotation hooks member changes; MLS engine pending lib.").font(.caption).foregroundColor(.secondary)
             Text("Crypto engine pending — verify in person once MLS lands.").font(.caption).foregroundColor(.secondary)
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 360)
+    }
+}
+struct BlockedView: View {
+    @StateObject private var s = AppSettings.shared
+    @State private var phone = ""
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Blocked Contacts").font(.headline)
+            TextField("Phone to block", text: $phone).textFieldStyle(.roundedBorder)
+            Button("Block") {
+                guard !phone.isEmpty, !s.blockedContacts.contains(phone) else { return }
+                s.blockedContacts.append(phone); phone = ""
+            }.buttonStyle(.borderedProminent).disabled(phone.isEmpty)
+            List(s.blockedContacts, id: \.self) { c in
+                HStack { Text(c); Spacer(); Button("Unblock") { s.blockedContacts.removeAll { $0 == c } }.buttonStyle(.link) }
+            }.frame(minHeight: 140)
             Button("Close") { dismiss() }
         }.padding().frame(width: 360)
     }
