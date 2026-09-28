@@ -918,9 +918,16 @@ struct ChatDetailView: View {
 
     private func stopAndSendVoice() {
         guard let url = recorder.stop() else { return }
-        guard let data = try? Data(contentsOf: url) else { recorder.discardConsumed(url); return }
-        chat.uploadAndSend(roomId: room.room_id, data: data, filename: "voice-\(Int(Date().timeIntervalSince1970)).m4a", mime: "audio/mp4", kind: MessageKinds.audio)
-        recorder.discardConsumed(url)
+        Task.detached {
+            guard let data = try? Data(contentsOf: url) else {
+                await MainActor.run { recorder.discardConsumed(url) }
+                return
+            }
+            await MainActor.run {
+                chat.uploadAndSend(roomId: room.room_id, data: data, filename: "voice-\(Int(Date().timeIntervalSince1970)).m4a", mime: "audio/mp4", kind: MessageKinds.audio)
+                recorder.discardConsumed(url)
+            }
+        }
     }
 
     private func pickFileForPreview() {
@@ -1561,19 +1568,28 @@ struct ProfileView: View {
             HStack {
                 Button("Pick avatar file") {
                     let p = NSOpenPanel(); p.canChooseFiles = true
-                    if p.runModal() == .OK, let u = p.url, let data = try? Data(contentsOf: u) {
-                        if u.scheme == "https" { avatar = u.absoluteString }
-                        else {
-                            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(u.lastPathComponent)
-                            try? data.write(to: tmp)
-                            avatarNote = "Uploading \(u.lastPathComponent)…"
-                            Task {
-                                guard let t = KeychainHelper.read(account: "session_token"),
-                                      let remote = await OllacoreAPI.shared.uploadAvatar(token: t, data: data, filename: u.lastPathComponent, mime: "image/jpeg") else {
-                                    avatarNote = "Picked \(u.lastPathComponent) (\(data.count/1024)KB) — upload endpoint pending; paste HTTPS URL to save."
-                                    return
+                    if p.runModal() == .OK, let u = p.url {
+                        avatarNote = "Reading \(u.lastPathComponent)…"
+                        Task.detached {
+                            guard let data = try? Data(contentsOf: u) else {
+                                await MainActor.run { avatarNote = "Could not read file." }
+                                return
+                            }
+                            await MainActor.run {
+                                if u.scheme == "https" { avatar = u.absoluteString }
+                                else {
+                                    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(u.lastPathComponent)
+                                    try? data.write(to: tmp)
+                                    avatarNote = "Uploading \(u.lastPathComponent)…"
+                                    Task {
+                                        guard let t = KeychainHelper.read(account: "session_token"),
+                                              let remote = await OllacoreAPI.shared.uploadAvatar(token: t, data: data, filename: u.lastPathComponent, mime: "image/jpeg") else {
+                                            avatarNote = "Picked \(u.lastPathComponent) (\(data.count/1024)KB) — upload endpoint pending; paste HTTPS URL to save."
+                                            return
+                                        }
+                                        avatar = remote; avatarNote = "Uploaded."
+                                    }
                                 }
-                                avatar = remote; avatarNote = "Uploaded."
                             }
                         }
                     }
@@ -1810,7 +1826,8 @@ final class CameraModel: NSObject, ObservableObject {
     }
     func capture(_ done: @escaping (Data?) -> Void) {
         delegate = PhotoDelegate(done: done)
-        output.capturePhoto(with: AVCapturePhotoSettings(), delegate: delegate!)
+        guard let d = delegate else { return }
+        output.capturePhoto(with: AVCapturePhotoSettings(), delegate: d)
     }
     func stop() { session.stopRunning() }
 }
