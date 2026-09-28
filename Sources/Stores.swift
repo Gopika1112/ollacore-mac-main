@@ -744,6 +744,15 @@ public struct FailedDraft: Identifiable {
     @Published public var mutedRooms: [String: Bool] = [:] {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(mutedRooms), forKey: "muted_rooms_v1") }
     }
+    @Published public var pinnedRooms: Set<String> = [] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(Array(pinnedRooms)), forKey: "pinned_rooms_v1") }
+    }
+    @Published public var archivedRooms: Set<String> = [] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(Array(archivedRooms)), forKey: "archived_rooms_v1") }
+    }
+    @Published public var localContacts: [LocalContact] = [] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(localContacts), forKey: "local_contacts_v1") }
+    }
     @Published public var roomAliases: [String: String] = [:] {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(roomAliases), forKey: "room_alias_v1") }
     }
@@ -753,6 +762,12 @@ public struct FailedDraft: Identifiable {
         themeRaw = UserDefaults.standard.string(forKey: "opt_theme") ?? "system"
         if let d = UserDefaults.standard.data(forKey: "muted_rooms_v1"),
            let m = try? JSONDecoder().decode([String: Bool].self, from: d) { mutedRooms = m }
+        if let d = UserDefaults.standard.data(forKey: "pinned_rooms_v1"),
+           let a = try? JSONDecoder().decode([String].self, from: d) { pinnedRooms = Set(a) }
+        if let d = UserDefaults.standard.data(forKey: "archived_rooms_v1"),
+           let a = try? JSONDecoder().decode([String].self, from: d) { archivedRooms = Set(a) }
+        if let d = UserDefaults.standard.data(forKey: "local_contacts_v1"),
+           let a = try? JSONDecoder().decode([LocalContact].self, from: d) { localContacts = a }
         if let d = UserDefaults.standard.data(forKey: "room_alias_v1"),
            let m = try? JSONDecoder().decode([String: String].self, from: d) { roomAliases = m }
     }
@@ -839,6 +854,17 @@ public struct StarredInfo: Codable { public var id: String; public var sender: S
         persist()
     }
     public func info(for id: String) -> StarredInfo? { meta[id] }
+}
+
+public struct LocalContact: Codable, Identifiable {
+    public var id: String
+    public var firstName: String; public var lastName: String; public var username: String
+    public var phone: String; public var sync: Bool
+    public init(id: String = UUID().uuidString, firstName: String, lastName: String, username: String, phone: String, sync: Bool = true) {
+        self.id = id; self.firstName = firstName; self.lastName = lastName
+        self.username = username; self.phone = phone; self.sync = sync
+    }
+    public var displayName: String { "\(firstName) \(lastName)".trimmingCharacters(in: .whitespaces) }
 }
 
 // MARK: - CallLogStore (mirrors Android CallLogStore — client-only JSON)

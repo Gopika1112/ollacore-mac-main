@@ -127,7 +127,7 @@ struct PhoneInputView: View {
     @ObservedObject var vm: AuthViewModel
     @FocusState private var phoneFocused: Bool
     @State private var cc = "+1"
-    let countries = ["+1 US", "+44 UK", "+91 IN", "+61 AU", "+81 JP", "+49 DE", "+33 FR"]
+    static let countries = ["+1 US", "+44 UK", "+91 IN", "+61 AU", "+81 JP", "+49 DE", "+33 FR", "+34 ES", "+39 IT", "+31 NL", "+46 SE", "+47 NO", "+45 DK", "+41 CH", "+43 AT", "+32 BE", "+353 IE", "+351 PT", "+30 GR", "+48 PL", "+36 HU", "+420 CZ", "+65 SG", "+82 KR", "+86 CN"]
     var body: some View {
         VStack(spacing: 16) {
             Text("Welcome").font(.title).bold()
@@ -219,6 +219,9 @@ struct HomeView: View {
     @State private var showCalls = false
     @State private var searchTask: Task<Void, Never>?
     @State private var filter = "All"
+    @State private var showArchived = false
+    @State private var selectingChats = false
+    @State private var selectedChatIds: Set<String> = []
     @State private var showContacts = false
     @State private var showGlobalSearch = false
     @State private var showUpdates = false
@@ -235,9 +238,24 @@ struct HomeView: View {
                 }
                 Section {
                     HStack {
-                        ForEach(["All", "Unread", "Groups", "Channels"], id: \.self) { f in
+                        ForEach(["All", "Unread", "Groups", "Channels", "Archived"], id: \.self) { f in
                             Button(f) { filter = f }.buttonStyle(f == filter ? .borderedProminent : .bordered).controlSize(.small)
                         }
+                    }
+                    HStack {
+                        Button(selectingChats ? "Done" : "Select") { selectingChats.toggle(); selectedChatIds.removeAll() }.buttonStyle(.link).controlSize(.small)
+                        Button("Mark all read") {
+                            Task {
+                                guard let t = auth.session.sessionToken else { return }
+                                for room in home.inbox where room.unread_count > 0 {
+                                    guard let rt = try? await OllacoreAPI.shared.roomToken(token: t, roomId: room.room_id, deviceId: auth.session.deviceId),
+                                          let page = try? await OllacoreAPI.shared.listMessages(roomToken: rt.access_token, roomId: room.room_id, limit: 1),
+                                          let last = page.messages.last else { continue }
+                                    _ = await OllacoreAPI.shared.markRead(roomToken: rt.access_token, roomId: room.room_id, messageId: last.id)
+                                }
+                                await home.refresh(token: t)
+                            }
+                        }.buttonStyle(.link).controlSize(.small)
                     }
                 } header: { Text("Filters") }
                 if !home.isLoading && home.error == nil && filtered.isEmpty {
@@ -256,8 +274,30 @@ struct HomeView: View {
                     Section { ProgressView("Loading…").frame(maxWidth: .infinity) }
                 }
                 Section("Conversations") {
+                    if selectingChats {
+                        HStack {
+                            Text("\(selectedChatIds.count) selected").font(.caption)
+                            Spacer()
+                            Button("Archive") {
+                                for id in selectedChatIds { settings.archivedRooms.insert(id) }
+                                selectedChatIds.removeAll()
+                            }.buttonStyle(.link).controlSize(.small)
+                            Button("Mute") {
+                                for id in selectedChatIds { settings.mutedRooms[id] = true }
+                                selectedChatIds.removeAll()
+                            }.buttonStyle(.link).controlSize(.small)
+                            Button("Clear") { selectedChatIds.removeAll() }.buttonStyle(.link).controlSize(.small)
+                        }
+                    }
                     ForEach(filtered, id: \.room_id) { item in
                         HStack(spacing: 8) {
+                            if selectingChats {
+                                Image(systemName: selectedChatIds.contains(item.room_id) ? "checkmark.square.fill" : "square")
+                                    .onTapGesture {
+                                        if selectedChatIds.contains(item.room_id) { selectedChatIds.remove(item.room_id) }
+                                        else { selectedChatIds.insert(item.room_id) }
+                                    }
+                            }
                             // Sidebar avatar circle.
                             Text(String((item.name ?? item.peer?.display_name ?? "?").prefix(1)).uppercased())
                                 .font(.caption).bold().foregroundColor(.white)
@@ -272,11 +312,24 @@ struct HomeView: View {
                                 if let ts = item.last_message?.created_at { Text(ts).font(.caption2).foregroundColor(.secondary) }
                             }
                             Spacer()
+                            if settings.pinnedRooms.contains(item.room_id) {
+                                Image(systemName: "pin.fill").font(.caption2).foregroundColor(.secondary)
+                            }
                             if item.unread_count > 0 {
                                 Text("\(item.unread_count)").font(.caption2).bold()
                                     .padding(6).background(Color.accentColor).foregroundColor(.white).clipShape(Circle())
                             }
                         }.tag(item)
+                        .contextMenu {
+                            Button(settings.pinnedRooms.contains(item.room_id) ? "Unpin" : "Pin to top") {
+                                if settings.pinnedRooms.contains(item.room_id) { settings.pinnedRooms.remove(item.room_id) }
+                                else { settings.pinnedRooms.insert(item.room_id) }
+                            }
+                            Button(settings.archivedRooms.contains(item.room_id) ? "Unarchive" : "Archive") {
+                                if settings.archivedRooms.contains(item.room_id) { settings.archivedRooms.remove(item.room_id) }
+                                else { settings.archivedRooms.insert(item.room_id) }
+                            }
+                        }
                     }
                 }
                 if !search.isEmpty, selectedRoom != nil {
@@ -384,10 +437,25 @@ struct HomeView: View {
     }
     var filtered: [InboxItem] {
         var list = home.inbox
+        if filter == "Archived" { list = list.filter { settings.archivedRooms.contains($0.room_id) } }
+        else { list = list.filter { !settings.archivedRooms.contains($0.room_id) } }
         if filter == "Unread" { list = list.filter { $0.unread_count > 0 } }
         if filter == "Groups" { list = list.filter { $0.kind.lowercased().contains("group") } }
         if filter == "Channels" { list = list.filter { $0.kind.lowercased().contains("channel") } }
+        // Pinned to top, then rest in inbox order.
+        let pinned = list.filter { settings.pinnedRooms.contains($0.room_id) }
+        let rest = list.filter { !settings.pinnedRooms.contains($0.room_id) }
+        list = pinned + rest
         guard !search.isEmpty else { return list }
+        // @username lookup: @alex matches peer username/display/phone.
+        if search.hasPrefix("@") {
+            let q = String(search.dropFirst()).lowercased()
+            return list.filter {
+                ($0.peer?.display_name ?? "").lowercased().contains(q) ||
+                ($0.peer?.phone ?? "").contains(q) ||
+                ($0.name ?? "").lowercased().contains(q)
+            }
+        }
         let q = search.lowercased()
         return list.filter {
             ($0.name ?? "").lowercased().contains(q) ||
@@ -1916,6 +1984,7 @@ struct ContactsView: View {
     @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
     @State private var phones = ""; @State private var found: [ContactUser] = []; @State private var msg: String?
     @State private var peerFilter = ""; @State private var showGroupFromContacts = false
+    @State private var showNewContact = false
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 12) {
@@ -1929,6 +1998,20 @@ struct ContactsView: View {
             TextField("phones, comma-separated", text: $phones).textFieldStyle(.roundedBorder)
             Button("New Group") { showGroupFromContacts = true }.buttonStyle(.link)
             .sheet(isPresented: $showGroupFromContacts) { NewGroupView(auth: auth, home: home) }
+            Button("New Contact") { showNewContact = true }.buttonStyle(.link)
+            .sheet(isPresented: $showNewContact) {
+                NewContactView(auth: auth, home: home)
+            }
+            // A-Z sections over local + found contacts.
+            let allNames = (AppSettings.shared.localContacts.map { ($0.displayName, $0.phone) } + found.map { ($0.display_name ?? $0.phone, $0.phone) }).sorted { $0.0 < $1.0 }
+            let sections = Dictionary(grouping: allNames, by: { String($0.0.prefix(1)).uppercased() })
+            ForEach(sections.keys.sorted(), id: \.self) { k in
+                Section("Contacts — \(k)") {
+                    ForEach(sections[k] ?? [], id: \.1) { (name, phone) in
+                        Text("\(name) • \(phone)").font(.caption)
+                    }
+                }
+            }
             Button("Lookup") {
                 Task {
                     guard let t = auth.session.sessionToken else { return }
@@ -1954,6 +2037,34 @@ struct ContactsView: View {
             if let msg { Text(msg).font(.caption).foregroundColor(.red) }
             Button("Close") { dismiss() }
         }.padding().frame(width: 400)
+    }
+}
+struct NewContactView: View {
+    @ObservedObject var auth: AuthViewModel; @ObservedObject var home: HomeViewModel
+    @State private var first = ""; @State private var last = ""; @State private var username = ""
+    @State private var cc = "+1"; @State private var phone = ""; @State private var sync = true
+    @State private var msg: String?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("New Contact").font(.headline)
+            TextField("First name", text: $first).textFieldStyle(.roundedBorder)
+            TextField("Last name", text: $last).textFieldStyle(.roundedBorder)
+            TextField("@username", text: $username).textFieldStyle(.roundedBorder)
+            Picker("Country", selection: $cc) {
+                ForEach(PhoneInputView.countries, id: \.self) { Text($0).tag(String($0.prefix(3)).trimmingCharacters(in: .whitespaces)) }
+            }.pickerStyle(.menu)
+            TextField("Phone digits", text: $phone).textFieldStyle(.roundedBorder)
+            Toggle("Sync contact", isOn: $sync)
+            Button("Save to Contacts") {
+                let full = cc + phone.filter(\.isNumber)
+                guard !first.isEmpty, !phone.isEmpty else { msg = "First name + phone required."; return }
+                AppSettings.shared.localContacts.append(LocalContact(firstName: first, lastName: last, username: username, phone: full, sync: sync))
+                msg = "Saved \(first) (\(full))"
+            }.buttonStyle(.borderedProminent)
+            if let msg { Text(msg).font(.caption).foregroundColor(.secondary) }
+            Button("Close") { dismiss() }
+        }.padding().frame(width: 360)
     }
 }
 struct GlobalSearchView: View {
