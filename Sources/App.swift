@@ -228,6 +228,7 @@ struct HomeView: View {
     @State private var showArchived = false
     @State private var selectingChats = false
     @State private var selectedChatIds: Set<String> = []
+    @State private var batchOpMsg: String? = nil
     @State private var showContacts = false
     @State private var showGlobalSearch = false
     @State private var showUpdates = false
@@ -294,8 +295,27 @@ struct HomeView: View {
                                 for id in selectedChatIds { settings.mutedRooms[id] = true }
                                 selectedChatIds.removeAll()
                             }.buttonStyle(.link).controlSize(.small)
+                            Button("Delete") {
+                                batchOpMsg = nil
+                                Task {
+                                    guard let t = auth.session.sessionToken else { return }
+                                    var left = 0, skipped = 0
+                                    for id in selectedChatIds {
+                                        guard let room = home.inbox.first(where: { $0.room_id == id }) else { continue }
+                                        if room.kind.lowercased().contains("group") {
+                                            if await OllacoreAPI.shared.leaveGroup(token: t, groupId: id) { left += 1 }
+                                        } else { skipped += 1 }
+                                    }
+                                    selectedChatIds.removeAll()
+                                    batchOpMsg = skipped > 0
+                                        ? "Left \(left) group(s); \(skipped) DM(s) can't be deleted server-side."
+                                        : "Left \(left) group(s)."
+                                    await home.refresh(token: t)
+                                }
+                            }.buttonStyle(.link).controlSize(.small)
                             Button("Clear") { selectedChatIds.removeAll() }.buttonStyle(.link).controlSize(.small)
                         }
+                        if let m = batchOpMsg { Text(m).font(.caption).foregroundColor(.secondary) }
                     }
                     ForEach(filtered, id: \.room_id) { item in
                         HStack(spacing: 8) {
@@ -635,9 +655,11 @@ struct ChatDetailView: View {
                         } else {
                         MessageBubble(message: m, roomId: room.room_id, chat: chat,
                                       roomKind: room.kind, isOwn: m.sender_id == ownId,
+                                      fontScale: settings.fontScale,
                                       onReply: { chat.replyTo = m },
                                       onForward: { forwarding = m },
-                                      onEdit: { editing = m })
+                                      onEdit: { editing = m },
+                                      onJumpTo: { rid in withAnimation { proxy.scrollTo(rid, anchor: .center) } })
                             .id(m.id)
                         }
                         if let replyId = m.reply_to {
@@ -1003,9 +1025,11 @@ struct MessageBubble: View {
     var roomKind: String = "direct"
     var isOwn: Bool = false
     @ObservedObject var chat: ChatViewModel
+    var fontScale: Double = 1.0
     var onReply: () -> Void = {}
     var onForward: () -> Void = {}
     var onEdit: () -> Void = {}
+    var onJumpTo: (String) -> Void = { _ in }
     @State private var imageURL: URL?
     @State private var showFullImage = false
     @State private var opening = false
@@ -1082,8 +1106,9 @@ struct MessageBubble: View {
             if let replyId = message.reply_to {
                 let quoted = chat.messages.first(where: { $0.id == replyId })
                 Text("↩ \(quoted?.body["text"]?.value as? String ?? "original message")")
-                    .font(.caption).foregroundColor(.secondary).lineLimit(2)
+                    .font(.system(size: 12 * fontScale)).foregroundColor(.secondary).lineLimit(2)
                     .padding(4).background(Color.secondary.opacity(0.12)).cornerRadius(4)
+                    .onTapGesture { onJumpTo(replyId) }
             }
             switch message.kind {
             case MessageKinds.image:
@@ -1120,7 +1145,7 @@ struct MessageBubble: View {
                     }.buttonStyle(.plain).disabled(opening)
                     .task { imageURL = await chat.resolveAttachmentURL(attachmentId: message.attachment_ids.first ?? "", roomId: roomId) }
                 }
-                if let c = caption { Text(c).font(.caption) }
+                if let c = caption { Text(c).font(.system(size: 12 * fontScale)) }
             case MessageKinds.audio:
                 // P0-4: dedicated audio UI, no black VideoPlayer box.
                 if let u = imageURL { AudioPlayerRow(url: u, filename: filename) }
@@ -1161,7 +1186,7 @@ struct MessageBubble: View {
                 let lat = message.body["lat"]?.value
                 let lon = message.body["lon"]?.value ?? message.body["lng"]?.value
                 Label("\(lat.map { "\($0)" } ?? "?"), \(lon.map { "\($0)" } ?? "?")", systemImage: "mappin").foregroundColor(.secondary)
-                if let c = caption { Text(c).font(.caption) }
+                if let c = caption { Text(c).font(.system(size: 12 * fontScale)) }
             case "contact":
                 let nm = message.body["name"]?.value as? String ?? "Contact"
                 let ph = message.body["phone"]?.value as? String ?? ""
@@ -1427,12 +1452,19 @@ struct NewDMView: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("New direct message").font(.headline)
-            // BUG-03: accept phone OR user id; resolve phones via lookup.
-            TextField("phone or user id", text: $peer).textFieldStyle(.roundedBorder)
+            // BUG-03 + @handle: phone, user id, or @username (resolved via local contacts).
+            TextField("phone, user id, or @username", text: $peer).textFieldStyle(.roundedBorder)
             Button("Create") {
                 Task {
                     guard let t = auth.session.sessionToken else { return }
                     var uid = peer.trimmingCharacters(in: .whitespaces)
+                    if uid.hasPrefix("@") {
+                        let handle = String(uid.dropFirst()).lowercased()
+                        if let local = AppSettings.shared.localContacts.first(where: {
+                            $0.username.lowercased() == handle || $0.username.lowercased() == uid.lowercased()
+                        }) { uid = local.phone }
+                        else { msg = "No contact matching \(uid)"; return }
+                    }
                     if uid.hasPrefix("+") || uid.first?.isNumber == true {
                         if let c = try? await OllacoreAPI.shared.lookupContacts(token: t, phones: [uid]), let first = c.first {
                             uid = first.user_id
