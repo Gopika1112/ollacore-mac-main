@@ -43,7 +43,22 @@ import UserNotifications
                 .onChange(of: auth.step) { _, s in if s == .authenticated && settings.appLockEnabled { locked = true } }
         }
         .commands { SidebarCommands() }
+        .commands {
+            // macOS keyboard shortcuts: ⌘F search, ⌘N new chat, Esc handled in views.
+            CommandMenu("Chat") {
+                Button("Search in Conversations") {
+                    NotificationCenter.default.post(name: .ollacoreFocusSearch, object: nil)
+                }.keyboardShortcut("f", modifiers: .command)
+                Button("New Chat") {
+                    NotificationCenter.default.post(name: .ollacoreNewChat, object: nil)
+                }.keyboardShortcut("n", modifiers: .command)
+            }
+        }
     }
+}
+extension Notification.Name {
+    static let ollacoreFocusSearch = Notification.Name("ollacore.focus.search")
+    static let ollacoreNewChat = Notification.Name("ollacore.new.chat")
 }
 struct LockGateView: View {
     var unlock: () -> Void
@@ -468,6 +483,13 @@ struct HomeView: View {
             }
         }
         .task { if let t = auth.session.sessionToken { await home.refresh(token: t) } }
+        // macOS shortcuts: ⌘F opens search, ⌘N starts a new chat.
+        .onReceive(NotificationCenter.default.publisher(for: .ollacoreFocusSearch)) { _ in
+            showGlobalSearch = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .ollacoreNewChat)) { _ in
+            showNewDM = true
+        }
         // APNs routing: auto-open + focus target conversation on push tap.
         .onReceive(NotificationCenter.default.publisher(for: .ollacorePushOpen)) { note in
             guard let roomId = note.userInfo?["room_id"] as? String,
@@ -813,6 +835,31 @@ struct ChatDetailView: View {
                 HStack { ForEach(["😀", "👍", "❤️", "😂", "🎉", "🙏"], id: \.self) { e in Button(e) { draft += e } } }.padding(.horizontal)
             }
             if let verr = recorder.error { Text(verr).font(.caption).foregroundColor(.red).padding(.horizontal) }
+            Text("Tip: drag & drop files here to attach • ⌘F search • ⌘N new chat • Esc clear").font(.caption2).foregroundColor(.secondary).padding(.horizontal)
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            // Drag & drop attachments onto the chat.
+            let targetRoom = room.room_id
+            for p in providers {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, let data = try? Data(contentsOf: url) else { return }
+                    let ext = url.pathExtension.lowercased()
+                    let mime: String; let kind: String
+                    switch ext {
+                    case "png": mime = "image/png"; kind = MessageKinds.image
+                    case "jpg", "jpeg": mime = "image/jpeg"; kind = MessageKinds.image
+                    case "gif": mime = "image/gif"; kind = MessageKinds.image
+                    case "mp4", "mov": mime = "video/mp4"; kind = MessageKinds.video
+                    case "mp3", "m4a", "wav", "ogg": mime = "audio/mpeg"; kind = MessageKinds.audio
+                    case "pdf": mime = "application/pdf"; kind = MessageKinds.file
+                    default: mime = "application/octet-stream"; kind = MessageKinds.file
+                    }
+                    Task { @MainActor in
+                        chat.uploadAndSend(roomId: targetRoom, data: data, filename: url.lastPathComponent, mime: mime, kind: kind)
+                    }
+                }
+            }
+            return true
         }
         .navigationTitle(settings.alias(for: room.room_id) ?? room.name ?? "Chat")
         .toolbar {
@@ -912,6 +959,7 @@ struct ChatDetailView: View {
             }
         }
         .onDisappear { previewLoadTask?.cancel(); typingStopTask?.cancel(); chat.disconnect() }
+        .onExitCommand { if chat.selectionMode { chat.clearSelection() } }
         .sheet(item: $forwarding) { msg in
             VStack(spacing: 12) {
                 Text("Forward message").font(.headline)
@@ -1057,6 +1105,7 @@ struct MessageBubble: View {
     @State private var opening = false
     @State private var showDoc = false
     @State private var docFile: URL? = nil
+    @State private var hovering = false
 
     private var caption: String? { message.body["text"]?.value as? String }
     private func shareImage() {
@@ -1223,14 +1272,25 @@ struct MessageBubble: View {
                 if let reacts = chat.reactions[message.id], !reacts.isEmpty {
                     ForEach(reacts.sorted(by: { $0.key < $1.key }), id: \.key) { emoji, count in
                         Text(count > 1 ? "\(emoji) \(count)" : emoji)
-                            .font(.caption).padding(4).background(Color.secondary.opacity(0.15)).cornerRadius(6)
+                            .font(.system(size: 12 * fontScale)).padding(4).background(Color.secondary.opacity(0.15)).cornerRadius(6)
                     }
                 }
                 if message.sender_id == chat.currentSenderId {
                     Text(chat.receiptLabel(for: message.id))
-                        .font(.caption2).foregroundColor(chat.receiptColor(for: message.id))
+                        .font(.system(size: 11 * fontScale)).foregroundColor(chat.receiptColor(for: message.id))
                 }
-                Text(String(message.created_at.prefix(16)).replacingOccurrences(of: "T", with: " ")).font(.caption2).foregroundColor(.secondary)
+                Text(String(message.created_at.prefix(16)).replacingOccurrences(of: "T", with: " ")).font(.system(size: 11 * fontScale)).foregroundColor(.secondary)
+            }
+            // Hover reaction quick-bar (desktop hover pattern).
+            .overlay(alignment: .topTrailing) {
+                if hovering {
+                    HStack(spacing: 4) {
+                        ForEach(["👍", "❤️", "😂", "😮"], id: \.self) { e in
+                            Button(e) { chat.addReaction(roomId: roomId, messageId: message.id, emoji: e) }
+                                .buttonStyle(.plain).font(.system(size: 14 * fontScale))
+                        }
+                    }.padding(4).background(Color(nsColor: .windowBackgroundColor)).cornerRadius(8).shadow(radius: 2)
+                }
             }
             }
         }
@@ -1241,6 +1301,7 @@ struct MessageBubble: View {
         .frame(maxWidth: .infinity, alignment: isOwn ? .trailing : .leading)
         .padding(.leading, isOwn ? 60 : 4)
         .padding(.trailing, isOwn ? 4 : 60)
+        .onHover { hovering = $0 }
         .onTapGesture {
             if chat.selectionMode { chat.toggleSelect(id: message.id) }
         }
@@ -1923,6 +1984,7 @@ struct AudioPlayerRow: View {
     @State private var player: AVPlayer?
     @State private var playing = false
     @State private var progress: Double = 0
+    @State private var rate: Float = 1.0
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -1932,10 +1994,16 @@ struct AudioPlayerRow: View {
                     else {
                         if let item = player?.currentItem, item.duration.isValid,
                            item.currentTime() >= item.duration { player?.seek(to: .zero) }
-                        player?.play(); playing = true
+                        player?.rate = rate; player?.play(); playing = true
                     }
                 }.buttonStyle(.bordered).controlSize(.small)
                 Text(filename ?? "Voice message").font(.caption).lineLimit(1)
+                Spacer()
+                // 1x / 1.5x / 2x voice speed.
+                Picker("", selection: $rate) {
+                    Text("1x").tag(Float(1.0)); Text("1.5x").tag(Float(1.5)); Text("2x").tag(Float(2.0))
+                }.pickerStyle(.segmented).frame(width: 130)
+                .onChange(of: rate) { _, r in if playing { player?.rate = r } }
             }
             Slider(value: $progress, in: 0...1) { editing in
                 if !editing, let d = player?.currentItem?.duration, d.isValid {
